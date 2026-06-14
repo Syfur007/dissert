@@ -8,7 +8,7 @@
 
 ## 1. Top-Level Pipeline Split
 
-The repository has two separate experimentation tracks:
+The repository has can have multiple separate experimentation tracks, such as:
 
 - **3D** medical segmentation — Synapse and ACDC datasets.
 - **2D** binary segmentation — polyp datasets.
