@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from layers.MKIR import MultiKernelInvertedResidualBlock
-from layers.GAG import GroupedAttentionGate
-from layers.MKIRA import ChannelAttention
-from layers.MKIRA import SpatialAttention
+from lib.layers.MKIR import MultiKernelInvertedResidualBlock
+from lib.layers.GAG import GroupedAttentionGate
+from lib.layers.MKIRA import ChannelAttention
+from lib.layers.MKIRA import SpatialAttention
 
 def mk_irb_bottleneck(in_c, out_c, n, s, expansion_factor=2, dw_parallel=True, add=True, kernel_sizes=[1,3,5], activation='relu6'):
     """

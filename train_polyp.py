@@ -12,7 +12,7 @@ from torch.autograd import Variable
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # Project-specific imports
-from lib.backbones import MK_UNet
+from lib.backbones.MK_UNet import MK_UNet
 from utils.dataloader_polyp import get_loader
 from utils.utils import clip_gradient, adjust_lr, AvgMeter, cal_params_flops
 
@@ -177,8 +177,8 @@ if __name__ == '__main__':
     parser.add_argument('--decay_epoch', type=int, default=300)
     parser.add_argument('--color_image', default=True)
     parser.add_argument('--augmentation', default=True)
-    parser.add_argument('--train_path', type=str, default=f'./data/polyp/target/{dataset_name}/train/')
-    parser.add_argument('--test_path', type=str, default=f'./data/polyp/target/{dataset_name}/')
+    parser.add_argument('--train_path', type=str, default=f'./data/polyp/{dataset_name}/train/')
+    parser.add_argument('--test_path', type=str, default=f'./data/polyp/{dataset_name}/')
     parser.add_argument('--train_save', type=str, default='') 
     opt = parser.parse_args()
 
@@ -235,7 +235,7 @@ if __name__ == '__main__':
         scheduler = CosineAnnealingLR(optimizer, T_max=opt.epoch, eta_min=1e-6)
 
         train_loader = get_loader(
-            image_root=f'{opt.train_path}/images/', gt_root=f'{opt.train_path}/masks/',
+            image_root=f'{opt.train_path}images/', gt_root=f'{opt.train_path}masks/',
             batchsize=opt.batchsize, trainsize=opt.img_size, 
             shuffle=True, augmentation=opt.augmentation, split='train', color_image=opt.color_image
         )
