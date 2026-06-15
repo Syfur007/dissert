@@ -7,11 +7,6 @@ from timm.models.layers import trunc_normal_tf_
 from timm.models.helpers import named_apply
 
 
-def gcd(a, b):
-    while b:
-        a, b = b, a % b
-    return a
-
 def _init_weights(module, name, scheme=''):
     if isinstance(module, nn.Conv2d):
         if scheme == 'normal':
