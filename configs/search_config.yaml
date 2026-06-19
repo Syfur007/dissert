@@ -1,0 +1,16 @@
+# Hyperparameter Search Configuration
+
+search:
+  method: "grid"           # "grid" or "random"
+  num_trials: 5            # Only used if method is "random"
+  output_dir: "search_results"
+
+# Param grid: list of values to search over
+grid:
+  training:
+    lr: [0.01, 0.001, 0.0001]
+    optimizer: ["adamw", "sgd"]
+  dataset:
+    batch_size: [4, 8]
+  model:
+    name: ["unet", "attention_unet"]

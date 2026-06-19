@@ -1,2 +1,9 @@
+.vscode/
 /data
+/checkpoints
+/logs
+/search_test_results
 /env
+/runs
+__pycache__/
+*.pyc

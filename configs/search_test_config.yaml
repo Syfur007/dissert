@@ -1,0 +1,12 @@
+# Minimal Search Config for Sanity Check
+
+search:
+  method: "grid"
+  output_dir: "search_test_results"
+
+grid:
+  training:
+    lr: [0.001]
+    optimizer: ["adamw"]
+  model:
+    name: ["unet", "attention_unet"]

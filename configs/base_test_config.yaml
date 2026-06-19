@@ -1,0 +1,47 @@
+# Test Base Configuration
+
+model:
+  name: "unet"
+  in_channels: 3
+  out_channels: 1
+  features: [32, 64, 128, 256] # smaller features to speed up CPU checks
+
+dataset:
+  name: "ClinicDB"
+  image_dir: "data/polyp/ClinicDB/train/images"
+  mask_dir: "data/polyp/ClinicDB/train/masks"
+  test_image_dir: "data/polyp/ClinicDB/test/images"
+  test_mask_dir: "data/polyp/ClinicDB/test/masks"
+  img_height: 128 # smaller spatial resolution to speed up check
+  img_width: 128
+  split_method: "random"
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  batch_size: 4
+  num_workers: 2
+
+training:
+  epochs: 1
+  lr: 0.001
+  optimizer: "adamw"
+  weight_decay: 0.0001
+  scheduler: "none"
+  loss_type: "combo"
+  device: "cpu" # run on CPU for test
+  seed: 42
+
+k_fold:
+  enabled: false
+
+checkpoint:
+  save_dir: "search_test_results/checkpoints"
+  resume: false
+  monitor_metric: "val_dice"
+  mode: "max"
+
+logging:
+  log_dir: "search_test_results/logs"
+  tb_dir: "search_test_results/runs"
+  experiment_name: "search_test"
+  log_interval: 10
