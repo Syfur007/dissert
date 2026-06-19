@@ -7,31 +7,16 @@ model:
   features: [64, 128, 256, 512]
 
 dataset:
-  name: "ClinicDB"
-  # Data directory paths
-  image_dir: "data/polyp/ClinicDB/train/images"
-  mask_dir: "data/polyp/ClinicDB/train/masks"
-  
-  # For evaluation on test sets (or test splits)
-  test_image_dir: "data/polyp/ClinicDB/test/images"
-  test_mask_dir: "data/polyp/ClinicDB/test/masks"
-  
-  # Resize dimensions for input images/masks
+  name: "ClinicDB"           # Dataset name — must match a registered handler (clinicdb, colondb)
+  root: "data/polyp/ClinicDB" # Root directory; handler derives split subdirs automatically
+
+  # Optional: override the list files used for each split (defaults are inside root/)
+  # train_list: "data/polyp/ClinicDB/train_list_clinicdb.txt"
+  # val_list:   "data/polyp/ClinicDB/val_list_clinicdb.txt"
+  # test_list:  "data/polyp/ClinicDB/test_list_clinicdb.txt"
+
   img_height: 256
   img_width: 256
-  
-  # Split settings (if K-Fold is disabled)
-  split_method: "random"   # "random" or "list" (using list files)
-  train_ratio: 0.8
-  val_ratio: 0.1
-  test_ratio: 0.1
-  
-  # List files (optional, if split_method is "list")
-  train_list: "data/polyp/ClinicDB/train_list_clinicdb.txt"
-  val_list: "data/polyp/ClinicDB/val_list_clinicdb.txt"
-  test_list: "data/polyp/ClinicDB/test_list_clinicdb.txt"
-  
-  # Loader settings
   batch_size: 8
   num_workers: 4
 
@@ -50,7 +35,7 @@ training:
   seed: 42
 
 k_fold:
-  enabled: true           # Set to true to run K-Fold cross validation
+  enabled: false           # Set to true to run K-Fold cross validation
   n_splits: 5              # Number of folds
   run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
 

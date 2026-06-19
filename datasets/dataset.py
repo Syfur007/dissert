@@ -6,58 +6,35 @@ from torch.utils.data import Dataset
 
 class MedicalSegmentationDataset(Dataset):
     """
-    A generic PyTorch Dataset for loading medical image segmentation pairs.
-    Maps images to their corresponding masks and applies Albumentations transforms.
+    Generic dataset for image-mask segmentation pairs.
+    Accepts either (image_dir, mask_dir, filenames) or a pre-built list of (img_path, mask_path) pairs.
     """
-    def __init__(self, image_dir, mask_dir, filenames=None, transform=None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
+    def __init__(self, image_dir=None, mask_dir=None, filenames=None, pairs=None, transform=None):
         self.transform = transform
-        
-        # If filenames is not provided, list all files in image_dir
-        if filenames is None:
-            if os.path.exists(image_dir):
-                self.filenames = sorted([f for f in os.listdir(image_dir) if os.path.isfile(os.path.join(image_dir, f))])
-            else:
-                self.filenames = []
+
+        if pairs is not None:
+            # Pre-built (img_path, mask_path) tuples — used by k-fold
+            self.pairs = list(pairs)
         else:
-            self.filenames = sorted(filenames)
-            
-        self.pairs = []
-        if os.path.exists(image_dir) and os.path.exists(mask_dir):
-            mask_files = os.listdir(mask_dir)
-            mask_names_map = {os.path.splitext(f)[0].lower(): f for f in mask_files}
-            
-            for fname in self.filenames:
-                img_path = os.path.join(image_dir, fname)
-                stem, _ = os.path.splitext(fname)
-                stem_lower = stem.lower()
-                
-                # Resolve mask path using multiple matching strategies
-                mask_file = None
-                if stem_lower in mask_names_map:
-                    mask_file = mask_names_map[stem_lower]
-                elif f"{stem_lower}_mask" in mask_names_map:
-                    mask_file = mask_names_map[f"{stem_lower}_mask"]
-                elif f"{stem_lower}_gt" in mask_names_map:
-                    mask_file = mask_names_map[f"{stem_lower}_gt"]
-                else:
-                    # Partial stem matching fallback
-                    for m_name in mask_names_map:
-                        if m_name.startswith(stem_lower) or stem_lower.startswith(m_name):
-                            mask_file = mask_names_map[m_name]
-                            break
-                            
-                if mask_file:
-                    mask_path = os.path.join(mask_dir, mask_file)
-                    self.pairs.append((img_path, mask_path))
-                else:
-                    mask_path = os.path.join(mask_dir, fname)
-                    self.pairs.append((img_path, mask_path))
-        else:
-            # If paths do not exist yet (mock/setup state), project expected paths
-            for fname in self.filenames:
-                self.pairs.append((os.path.join(image_dir, fname), os.path.join(mask_dir, fname)))
+            if filenames is None:
+                filenames = sorted(f for f in os.listdir(image_dir)
+                                   if os.path.isfile(os.path.join(image_dir, f))) if os.path.exists(image_dir) else []
+
+            mask_names_map = {}
+            if mask_dir and os.path.exists(mask_dir):
+                mask_names_map = {os.path.splitext(f)[0].lower(): f for f in os.listdir(mask_dir)}
+
+            self.pairs = []
+            for fname in filenames:
+                stem = os.path.splitext(fname)[0].lower()
+                mask_file = (mask_names_map.get(stem)
+                             or mask_names_map.get(f"{stem}_mask")
+                             or mask_names_map.get(f"{stem}_gt")
+                             or fname)
+                self.pairs.append((
+                    os.path.join(image_dir, fname),
+                    os.path.join(mask_dir, mask_file),
+                ))
 
     def __len__(self):
         return len(self.pairs)
