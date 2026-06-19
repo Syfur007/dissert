@@ -5,5 +5,6 @@
 /search_test_results
 /env
 /runs
+/pretrained_pth
 __pycache__/
 *.pyc
