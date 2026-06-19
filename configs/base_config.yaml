@@ -50,13 +50,13 @@ training:
   seed: 42
 
 k_fold:
-  enabled: false           # Set to true to run K-Fold cross validation
+  enabled: true           # Set to true to run K-Fold cross validation
   n_splits: 5              # Number of folds
   run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
 
 checkpoint:
   save_dir: "checkpoints"
-  resume: false
+  resume: true
   checkpoint_path: ""      # Path to load checkpoint for resume or eval
   monitor_metric: "val_dice" # Metric to monitor for best model ("val_dice", "val_miou", "val_loss")
   mode: "max"              # "max" or "min"
