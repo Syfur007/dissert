@@ -63,10 +63,14 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Explicit path to model checkpoint")
     parser.add_argument("--fold", type=int, default=None, help="Specific fold checkpoint to evaluate")
     parser.add_argument("--ensemble", action="store_true", help="Ensemble evaluation of all K-folds")
+    parser.add_argument("--dataset_dir", type=str, default=None, help="Override dataset directory")
     args = parser.parse_args()
     
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+        
+    if args.dataset_dir is not None:
+        config['dataset']['root'] = args.dataset_dir
         
     training_cfg = config['training']
     dataset_cfg = config['dataset']
