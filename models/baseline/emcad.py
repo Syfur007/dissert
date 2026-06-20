@@ -396,7 +396,7 @@ class EMCAD(nn.Module):
     
 
 class EMCADNet(nn.Module):
-    def __init__(self, num_classes=1, kernel_sizes=[1,3,5], expansion_factor=2, dw_parallel=True, add=True, lgag_ks=3, activation='relu', encoder='pvt_v2_b2', pretrain=True, pretrained_dir='./pretrained_pth/pvt/'):
+    def __init__(self, out_channels=1, kernel_sizes=[1,3,5], expansion_factor=2, dw_parallel=True, add=True, lgag_ks=3, activation='relu', encoder='pvt_v2_b2', pretrain=True, pretrained_dir='./pretrained_pth/pvt/'):
         super(EMCADNet, self).__init__()
 
         # conv block to convert single channel to 3 channels
@@ -468,10 +468,10 @@ class EMCADNet(nn.Module):
         print('Model %s created, param count: %d' %
                      ('EMCAD decoder: ', sum([m.numel() for m in self.decoder.parameters()])))
              
-        self.out_head4 = nn.Conv2d(channels[0], num_classes, 1)
-        self.out_head3 = nn.Conv2d(channels[1], num_classes, 1)
-        self.out_head2 = nn.Conv2d(channels[2], num_classes, 1)
-        self.out_head1 = nn.Conv2d(channels[3], num_classes, 1)
+        self.out_head4 = nn.Conv2d(channels[0], out_channels, 1)
+        self.out_head3 = nn.Conv2d(channels[1], out_channels, 1)
+        self.out_head2 = nn.Conv2d(channels[2], out_channels, 1)
+        self.out_head1 = nn.Conv2d(channels[3], out_channels, 1)
         
     def forward(self, x, mode='test'):
         
