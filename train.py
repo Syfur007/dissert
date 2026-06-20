@@ -197,12 +197,7 @@ def run_training(config, fold=None):
     
     # Initialize model
     model_cfg = config['model']
-    model = get_model(
-        model_cfg['name'],
-        in_channels=model_cfg['in_channels'],
-        out_channels=model_cfg['out_channels'],
-        features=model_cfg['features']
-    ).to(device)
+    model = get_model(**model_cfg).to(device)
     
     # Show parameters and FLOPs complexity
     try:
