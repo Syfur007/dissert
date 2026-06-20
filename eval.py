@@ -104,12 +104,7 @@ def main():
         for f in range(n_splits):
             fold_chk_path = os.path.join(checkpoint_dir, f"best_fold{f}.pth")
             if os.path.exists(fold_chk_path):
-                model_f = get_model(
-                    model_cfg['name'],
-                    in_channels=model_cfg['in_channels'],
-                    out_channels=model_cfg['out_channels'],
-                    features=model_cfg['features']
-                ).to(device)
+                model_f = get_model(**model_cfg).to(device)
                 
                 checkpoint = torch.load(fold_chk_path, map_location=device)
                 model_f.load_state_dict(checkpoint['model_state_dict'], strict=False)
@@ -126,12 +121,7 @@ def main():
         model = ensemble_models[0]
     else:
         # Load a single model
-        model = get_model(
-            model_cfg['name'],
-            in_channels=model_cfg['in_channels'],
-            out_channels=model_cfg['out_channels'],
-            features=model_cfg['features']
-        ).to(device)
+        model = get_model(**model_cfg).to(device)
         
         # Determine path
         if args.checkpoint:
