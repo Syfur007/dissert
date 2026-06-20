@@ -310,6 +310,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs")
     parser.add_argument("--model", type=str, default=None, help="Override model architecture name")
+    parser.add_argument("--dataset_dir", type=str, default=None, help="Override dataset directory")
     return parser.parse_args()
 
 def main():
@@ -333,6 +334,8 @@ def main():
         config['training']['epochs'] = args.epochs
     if args.model is not None:
         config['model']['name'] = args.model
+    if args.dataset_dir is not None:
+        config['dataset']['root'] = args.dataset_dir
         
     kfold_cfg = config.get('k_fold', {})
     

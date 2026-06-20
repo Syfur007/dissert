@@ -497,7 +497,7 @@ class EMCADNet(nn.Module):
         p2 = F.interpolate(p2, scale_factor=8, mode='bilinear')
         p1 = F.interpolate(p1, scale_factor=4, mode='bilinear')
 
-        if mode == 'test':
-            return [p4, p3, p2, p1]
+        # if mode == 'test':
+        #     return [p4, p3, p2, p1]
         
         return p1
