@@ -1,6 +1,6 @@
-from .unet import UNet
-from .attention_unet import AttentionUNet
-from .mk_unet import MK_UNet
+from .baseline.unet import UNet
+from .baseline.attention_unet import AttentionUNet
+from .baseline.mk_unet import MK_UNet
 
 MODEL_REGISTRY = {
     "unet": UNet,

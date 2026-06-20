@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .blocks import DoubleConv, EncoderBlock, AttentionBlock
+from ..blocks import DoubleConv, EncoderBlock, AttentionBlock
 
 class AttentionDecoderBlock(nn.Module):
     """

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .blocks import DoubleConv, EncoderBlock, DecoderBlock
+from ..blocks import DoubleConv, EncoderBlock, DecoderBlock
 
 class UNet(nn.Module):
     """
