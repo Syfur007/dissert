@@ -1,12 +1,16 @@
 from .baseline.unet import UNet
 from .baseline.attention_unet import AttentionUNet
 from .baseline.mk_unet import MK_UNet
+from .baseline.mk_unet import MK_UNet_S
+from .baseline.mk_unet import MK_UNet_T
 from .baseline.emcad import EMCADNet
 
 MODEL_REGISTRY = {
     "unet": UNet,
     "attention_unet": AttentionUNet,
     "mk_unet": MK_UNet,
+    "mk_unet_s": MK_UNet_S,
+    "mk_unet_t": MK_UNet_T,
     "emcad": EMCADNet
 }
 
