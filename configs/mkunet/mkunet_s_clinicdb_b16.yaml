@@ -54,5 +54,5 @@ checkpoint:
 logging:
   log_dir: "logs"
   tb_dir: "runs"           # TensorBoard event log directory
-  experiment_name: "clinicdb_mkunet"
+  experiment_name: "mkunet_s_clinicdb_b16"
   log_interval: 10         # Print/log training progress every N batches
