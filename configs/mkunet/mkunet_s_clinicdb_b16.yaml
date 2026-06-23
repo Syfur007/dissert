@@ -39,7 +39,7 @@ training:
   device: "cuda"           # "cuda" or "cpu"
   seed: 42
   amp: true            # default: false
-  grad_clip_norm: 1.0  # default: null (disabled)
+  grad_clip_norm: 0.5  # default: null (disabled)
 
 k_fold:
   enabled: true           # Set to true to run K-Fold cross validation

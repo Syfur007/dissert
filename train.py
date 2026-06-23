@@ -133,7 +133,7 @@ def set_seed(seed):
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger, scaler=None, grad_clip_norm=None):
     """
-    scaler: a torch.amp.GradScaler instance to enable AMP, or None to train in full precision.
+    scaler: a torch.cuda.amp.GradScaler instance to enable AMP, or None to train in full precision.
     grad_clip_norm: max gradient norm for clip_grad_norm_, or None to disable clipping.
     """
     model.train()
@@ -148,7 +148,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logg
         optimizer.zero_grad()
 
         if use_amp:
-            with torch.amp.autocast(device_type=device.type):
+            with torch.cuda.amp.autocast():
                 outputs = model(images)
                 loss = criterion(outputs, masks)
 
@@ -195,7 +195,7 @@ def validate(model, dataloader, criterion, device, logger, use_amp=False):
                 # No GradScaler needed here -- there's no backward pass to
                 # protect from fp16 underflow, just the memory/speed benefit
                 # of running the forward pass in mixed precision.
-                with torch.amp.autocast(device_type=device.type):
+                with torch.cuda.amp.autocast():
                     outputs = model(images)
                     loss = criterion(outputs, masks)
             else:
@@ -303,7 +303,7 @@ def run_training(config, fold=None):
     use_amp = amp_requested and device.type == 'cuda'
     if amp_requested and not use_amp:
         logger.warning("AMP requested in config but CUDA is not available/selected; training in full precision.")
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     if use_amp:
         logger.info("Automatic Mixed Precision (AMP) training enabled.")
 
