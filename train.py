@@ -26,29 +26,60 @@ class DiceLoss(nn.Module):
     def __init__(self, smooth=1e-5):
         super().__init__()
         self.smooth = smooth
-        
+
     def forward(self, logits, targets):
-        # We assume targets have the same spatial dimensions as logits
         if logits.shape[1] == 1:
             # Binary segmentation
             probs = torch.sigmoid(logits)
             probs = probs.view(-1)
-            targets = targets.view(-1)
+            targets = targets.view(-1).float()
             intersection = (probs * targets).sum()
             dice = (2. * intersection + self.smooth) / (probs.sum() + targets.sum() + self.smooth)
             return 1. - dice
         else:
-            # Multi-class segmentation (one-hot targets expected)
-            probs = torch.softmax(logits, dim=1)
-            dice_loss = 0.0
+            # Multi-class segmentation.
+            # `targets` may arrive as integer class-index maps (N, H, W) or
+            # (N, 1, H, W), or already as one-hot (N, C, H, W). Normalize to
+            # one-hot here so this loss is safe to use standalone
+            # (loss_type: 'dice'), not only when pre-converted by ComboLoss.
             num_classes = logits.shape[1]
+            probs = torch.softmax(logits, dim=1)
+
+            if targets.ndim == 4 and targets.shape[1] == num_classes:
+                one_hot_targets = targets.float()
+            else:
+                if targets.ndim == 4 and targets.shape[1] == 1:
+                    targets = targets.squeeze(1)
+                one_hot_targets = nn.functional.one_hot(
+                    targets.long(), num_classes=num_classes
+                ).permute(0, 3, 1, 2).float()
+
+            dice_loss = 0.0
             for c in range(num_classes):
                 p_c = probs[:, c].reshape(-1)
-                t_c = targets[:, c].reshape(-1)
+                t_c = one_hot_targets[:, c].reshape(-1)
                 intersection = (p_c * t_c).sum()
                 dice = (2. * intersection + self.smooth) / (p_c.sum() + t_c.sum() + self.smooth)
                 dice_loss += (1. - dice)
             return dice_loss / num_classes
+
+
+class CrossEntropyLossWrapper(nn.Module):
+    """
+    Thin wrapper around nn.CrossEntropyLoss that normalizes target shape/dtype
+    before delegating. Masks loaded from disk aren't guaranteed to already be
+    squeezed to (N, H, W) and cast to int64, so calling nn.CrossEntropyLoss
+    directly on raw masks can throw or, worse, silently misbehave.
+    """
+    def __init__(self):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss()
+
+    def forward(self, logits, targets):
+        if targets.ndim == 4 and targets.shape[1] == 1:
+            targets = targets.squeeze(1)
+        return self.ce(logits, targets.long())
+
 
 class ComboLoss(nn.Module):
     """Combines BCE (or CE) and Dice Loss to leverage both voxel-wise and region-wise objectives."""
@@ -57,12 +88,12 @@ class ComboLoss(nn.Module):
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.dice = DiceLoss()
-        
+
         if num_classes == 1:
             self.ce = nn.BCEWithLogitsLoss()
         else:
             self.ce = nn.CrossEntropyLoss()
-            
+
     def forward(self, logits, targets):
         # targets shape for BCE is (N, 1, H, W)
         # targets shape for CE is (N, H, W) containing class indices
@@ -78,17 +109,14 @@ class ComboLoss(nn.Module):
                 ce_targets = targets.argmax(dim=1).long()
             else:
                 ce_targets = targets.long()
-                
+
             ce_loss = self.ce(logits, ce_targets)
-            
-            # For multi-class dice, we need one-hot targets
-            one_hot_targets = targets
-            if targets.shape[1] == 1 or targets.ndim == 3:
-                # convert indices to one-hot representation
-                one_hot_targets = nn.functional.one_hot(ce_targets, num_classes=logits.shape[1]).permute(0, 3, 1, 2).float()
-                
-            dice_loss = self.dice(logits, one_hot_targets)
-            
+
+            # DiceLoss now normalizes target format internally, so we can
+            # pass the integer class-index targets straight through instead
+            # of duplicating the one-hot conversion here.
+            dice_loss = self.dice(logits, ce_targets)
+
         return self.bce_weight * ce_loss + self.dice_weight * dice_loss
 
 # --- SEEDING FOR REPRODUCIBILITY ---
@@ -104,7 +132,7 @@ def set_seed(seed):
 
 # --- TRAINING PIPELINE LOOP ---
 
-def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, device, epoch, logger):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger):
     model.train()
     running_loss = 0.0
     
@@ -148,9 +176,13 @@ def validate(model, dataloader, criterion, device, logger):
                 probs = torch.sigmoid(outputs)
                 preds = (probs > 0.5).cpu().numpy().astype(np.uint8)
             else:
-                # Multiclass
+                # Multiclass: take the most likely class per pixel so shapes
+                # match the (H, W) integer ground-truth masks. Without this
+                # argmax, preds stays as (C, H, W) softmax probabilities,
+                # which breaks Dice/IoU/HD95/ASD computation and therefore
+                # corrupts the very metric used for checkpoint selection.
                 probs = torch.softmax(outputs, dim=1)
-                preds = probs.cpu().numpy()  # Probabilities per class
+                preds = torch.argmax(probs, dim=1).cpu().numpy().astype(np.uint8)
                 
             preds_list.extend([p for p in preds])
             gts_list.extend([m.cpu().numpy().astype(np.uint8) for m in masks])
@@ -208,7 +240,7 @@ def run_training(config, fold=None):
         
     # Setup loss function
     if training_cfg['loss_type'] == 'bce':
-        criterion = nn.BCEWithLogitsLoss() if model_cfg['out_channels'] == 1 else nn.CrossEntropyLoss()
+        criterion = nn.BCEWithLogitsLoss() if model_cfg['out_channels'] == 1 else CrossEntropyLossWrapper()
     elif training_cfg['loss_type'] == 'dice':
         criterion = DiceLoss()
     else:
@@ -240,7 +272,6 @@ def run_training(config, fold=None):
     tracker = TensorBoardTracker(log_cfg['tb_dir'], experiment_name)
     
     start_epoch = 1
-    best_val_metric = float('-inf') if chk_manager.mode == "max" else float('inf')
     
     # Resume training logic
     if chk_cfg.get('resume', False):
@@ -253,14 +284,20 @@ def run_training(config, fold=None):
             start_epoch, loaded_metric, _ = chk_manager.load(chk_path, model, optimizer, scheduler)
             start_epoch += 1  # start from next epoch
             if loaded_metric is not None:
-                best_val_metric = loaded_metric
+                # Restore the "best so far" tracker on chk_manager itself.
+                # is_better()/best_metric (used below and as this function's
+                # return value) live on chk_manager, not on a local variable,
+                # so without this resumed training would silently reset the
+                # best-so-far to -inf/inf and could overwrite a genuinely
+                # better earlier checkpoint on the very next epoch.
+                chk_manager.best_metric = loaded_metric
         else:
             logger.warning(f"No checkpoint found at {chk_path}. Starting training from scratch.")
             
     # Training Loop
     logger.info(f"Starting training loop from epoch {start_epoch} to {training_cfg['epochs']}...")
     for epoch in range(start_epoch, training_cfg['epochs'] + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, device, epoch, logger)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, logger)
         val_metrics = validate(model, val_loader, criterion, device, logger)
         
         if scheduler:
