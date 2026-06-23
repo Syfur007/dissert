@@ -33,6 +33,8 @@ training:
   loss_type: "combo"       # "bce", "dice", "combo" (BCE + Dice)
   device: "cuda"           # "cuda" or "cpu"
   seed: 42
+  amp: true            # default: false
+  grad_clip_norm: 1.0  # default: null (disabled)
 
 k_fold:
   enabled: false           # Set to true to run K-Fold cross validation

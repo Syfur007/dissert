@@ -120,7 +120,6 @@ class ComboLoss(nn.Module):
         return self.bce_weight * ce_loss + self.dice_weight * dice_loss
 
 # --- SEEDING FOR REPRODUCIBILITY ---
-
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -132,29 +131,55 @@ def set_seed(seed):
 
 # --- TRAINING PIPELINE LOOP ---
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger, scaler=None, grad_clip_norm=None):
+    """
+    scaler: a torch.amp.GradScaler instance to enable AMP, or None to train in full precision.
+    grad_clip_norm: max gradient norm for clip_grad_norm_, or None to disable clipping.
+    """
     model.train()
     running_loss = 0.0
-    
+    use_amp = scaler is not None
+
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
     for images, masks in pbar:
         images = images.to(device)
         masks = masks.to(device)
-        
+
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        
-        loss.backward()
-        optimizer.step()
-        
+
+        if use_amp:
+            with torch.amp.autocast(device_type=device.type):
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+
+            scaler.scale(loss).backward()
+
+            if grad_clip_norm is not None:
+                # Gradients must be unscaled before clipping, otherwise we'd
+                # be clipping against the artificially inflated scaled norm
+                # rather than the true gradient norm.
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+
+            optimizer.step()
+
         running_loss += loss.item() * images.size(0)
         pbar.set_postfix(loss=loss.item())
         
     epoch_loss = running_loss / len(dataloader.dataset)
     return epoch_loss
 
-def validate(model, dataloader, criterion, device, logger):
+def validate(model, dataloader, criterion, device, logger, use_amp=False):
     model.eval()
     running_loss = 0.0
     
@@ -165,9 +190,17 @@ def validate(model, dataloader, criterion, device, logger):
         for images, masks in tqdm(dataloader, desc="Validating"):
             images = images.to(device)
             masks = masks.to(device)
-            
-            outputs = model(images)
-            loss = criterion(outputs, masks)
+
+            if use_amp:
+                # No GradScaler needed here -- there's no backward pass to
+                # protect from fp16 underflow, just the memory/speed benefit
+                # of running the forward pass in mixed precision.
+                with torch.amp.autocast(device_type=device.type):
+                    outputs = model(images)
+                    loss = criterion(outputs, masks)
+            else:
+                outputs = model(images)
+                loss = criterion(outputs, masks)
             running_loss += loss.item() * images.size(0)
             
             # Prepare predictions and ground truths for metrics
@@ -260,7 +293,26 @@ def run_training(config, fold=None):
         scheduler = CosineAnnealingLR(optimizer, T_max=training_cfg['epochs'])
     elif training_cfg['scheduler'] == 'step':
         scheduler = StepLR(optimizer, step_size=training_cfg['lr_step_size'], gamma=training_cfg['lr_gamma'])
-        
+
+    # --- AMP (mixed precision) and gradient clipping, both config-driven ---
+    # training.amp: bool, default False. Only takes effect on CUDA -- AMP's
+    # speed/memory benefit comes from Tensor Cores, and GradScaler's loss
+    # scaling logic is built around fp16 underflow on GPU, so a CPU run with
+    # amp: true just falls back to full precision with a warning.
+    amp_requested = training_cfg.get('amp', False)
+    use_amp = amp_requested and device.type == 'cuda'
+    if amp_requested and not use_amp:
+        logger.warning("AMP requested in config but CUDA is not available/selected; training in full precision.")
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    if use_amp:
+        logger.info("Automatic Mixed Precision (AMP) training enabled.")
+
+    # training.grad_clip_norm: float, default None (disabled). Typical
+    # segmentation values are 1.0-5.0; start at 1.0 if unsure.
+    grad_clip_norm = training_cfg.get('grad_clip_norm', None)
+    if grad_clip_norm is not None:
+        logger.info(f"Gradient clipping enabled with max_norm={grad_clip_norm}")
+
     # Checkpoint and Experiment tracking managers
     checkpoint_dir = os.path.join(chk_cfg.get('save_dir', 'checkpoints'), log_cfg['experiment_name'])
     chk_manager = CheckpointManager(
@@ -291,14 +343,25 @@ def run_training(config, fold=None):
                 # best-so-far to -inf/inf and could overwrite a genuinely
                 # better earlier checkpoint on the very next epoch.
                 chk_manager.best_metric = loaded_metric
+            # Note: chk_manager.load() does not currently restore GradScaler
+            # state (its signature only takes model/optimizer/scheduler), so
+            # a resumed AMP run starts with a fresh loss-scale factor rather
+            # than the one in effect when training was paused. This is
+            # harmless in practice -- GradScaler re-calibrates its scale
+            # within a handful of iterations -- but if you want bit-for-bit
+            # resume behavior, extend CheckpointManager to also persist
+            # scaler.state_dict().
         else:
             logger.warning(f"No checkpoint found at {chk_path}. Starting training from scratch.")
             
     # Training Loop
     logger.info(f"Starting training loop from epoch {start_epoch} to {training_cfg['epochs']}...")
     for epoch in range(start_epoch, training_cfg['epochs'] + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, logger)
-        val_metrics = validate(model, val_loader, criterion, device, logger)
+        train_loss = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, epoch, logger,
+            scaler=scaler, grad_clip_norm=grad_clip_norm
+        )
+        val_metrics = validate(model, val_loader, criterion, device, logger, use_amp=use_amp)
         
         if scheduler:
             scheduler.step()
@@ -348,6 +411,8 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs")
     parser.add_argument("--model", type=str, default=None, help="Override model architecture name")
     parser.add_argument("--dataset_dir", type=str, default=None, help="Override dataset directory")
+    parser.add_argument("--amp", action="store_true", help="Enable Automatic Mixed Precision training")
+    parser.add_argument("--grad-clip-norm", type=float, default=None, help="Override gradient clipping max norm")
     return parser.parse_args()
 
 def main():
@@ -373,6 +438,10 @@ def main():
         config['model']['name'] = args.model
     if args.dataset_dir is not None:
         config['dataset']['root'] = args.dataset_dir
+    if args.amp:
+        config['training']['amp'] = True
+    if args.grad_clip_norm is not None:
+        config['training']['grad_clip_norm'] = args.grad_clip_norm
         
     kfold_cfg = config.get('k_fold', {})
     
