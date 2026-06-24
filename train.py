@@ -129,55 +129,80 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+
+def _round_to_divisor(value, divisor):
+    """
+    Round a spatial dimension to the nearest multiple of `divisor`, with a
+    floor of one divisor unit.
+    """
+    rounded = int(round(value / divisor)) * divisor
+    return max(divisor, rounded)
+
+
 # --- TRAINING PIPELINE LOOP ---
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger, scaler=None, grad_clip_norm=None):
-    """
-    scaler: a torch.cuda.amp.GradScaler instance to enable AMP, or None to train in full precision.
-    grad_clip_norm: max gradient norm for clip_grad_norm_, or None to disable clipping.
-    """
+def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger, 
+                    scaler=None, grad_clip_norm=None, multi_scale_cfg=None):
     model.train()
     running_loss = 0.0
-    use_amp = scaler is not None
+    
+    # Extract multi-scale settings
+    ms_enabled = multi_scale_cfg.get('enabled', False) if multi_scale_cfg else False
+    ms_scales = multi_scale_cfg.get('scales', [0.75, 1.0, 1.25]) if multi_scale_cfg else []
+    ms_size_divisor = multi_scale_cfg.get('size_divisor', 32) if multi_scale_cfg else 32
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
     for images, masks in pbar:
         images = images.to(device)
         masks = masks.to(device)
+        
+        # Apply stochastic multi-scale resizing on the current batch
+        if ms_enabled and ms_scales:
+            scale = random.choice(ms_scales)
+            if scale != 1.0:
+                h, w = images.shape[2], images.shape[3]
+                new_h = _round_to_divisor(h * scale, ms_size_divisor)
+                new_w = _round_to_divisor(w * scale, ms_size_divisor)
+                
+                # Resize images using bilinear interpolation
+                images = nn.functional.interpolate(
+                    images, size=(new_h, new_w), mode='bilinear', align_corners=False
+                )
+                # Resize masks using nearest neighbor to preserve discrete class labels/bounds
+                masks = nn.functional.interpolate(
+                    masks, size=(new_h, new_w), mode='nearest'
+                )
 
         optimizer.zero_grad()
-
-        if use_amp:
+        
+        # Mixed Precision or Full Precision Step
+        if scaler is not None:
             with torch.cuda.amp.autocast():
                 outputs = model(images)
                 loss = criterion(outputs, masks)
-
+            
             scaler.scale(loss).backward()
-
-            if grad_clip_norm is not None:
-                # Gradients must be unscaled before clipping, otherwise we'd
-                # be clipping against the artificially inflated scaled norm
-                # rather than the true gradient norm.
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-
+            scaler.unscale_(optimizer)
+            
+            clip_val = grad_clip_norm if grad_clip_norm is not None else 1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_val)
+            
             scaler.step(optimizer)
             scaler.update()
         else:
             outputs = model(images)
             loss = criterion(outputs, masks)
             loss.backward()
-
-            if grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-
+            
+            clip_val = grad_clip_norm if grad_clip_norm is not None else 1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_val)
+            
             optimizer.step()
-
+            
         running_loss += loss.item() * images.size(0)
         pbar.set_postfix(loss=loss.item())
         
-    epoch_loss = running_loss / len(dataloader.dataset)
-    return epoch_loss
+    return running_loss / len(dataloader.dataset)
 
 def validate(model, dataloader, criterion, device, logger, use_amp=False):
     model.eval()
@@ -359,7 +384,8 @@ def run_training(config, fold=None):
     for epoch in range(start_epoch, training_cfg['epochs'] + 1):
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, logger,
-            scaler=scaler, grad_clip_norm=grad_clip_norm
+            scaler=scaler, grad_clip_norm=grad_clip_norm,
+            multi_scale_cfg=training_cfg.get('multi_scale', None) # <-- Added here
         )
         val_metrics = validate(model, val_loader, criterion, device, logger, use_amp=use_amp)
         
@@ -455,7 +481,7 @@ def main():
         for f in run_folds:
             print(f"\n=================== TRAINING FOLD {f} ===================")
             best_score = run_training(config, fold=f)
-            fold_scores.append(best_score)
+            fold_scores.append(best_score)  
             
         print("\n=================== K-FOLD SUMMARY ===================")
         print(f"Monitored metric ({config['checkpoint']['monitor_metric']}) across folds:")

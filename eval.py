@@ -235,7 +235,8 @@ def main():
     print("="*50 + "\n")
 
     # Save markdown report to disk
-    report_path = os.path.join(log_cfg['log_dir'], f"{log_cfg['experiment_name']}{"_ensemble" if args.ensemble else ""}_report.md")
+    report_ensemble = "ensemble_" if args.ensemble else ""
+    report_path = os.path.join(log_cfg['log_dir'], f"{log_cfg['experiment_name']}_{report_ensemble}report.md")
     with open(report_path, 'w') as f:
         f.write(f"# Evaluation Report - {log_cfg['experiment_name']}\n\n")
         f.write(tabulate(table_data, headers="firstrow", tablefmt="github"))
