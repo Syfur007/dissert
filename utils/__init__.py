@@ -1,4 +1,5 @@
 from .logger import setup_logger, TensorBoardTracker
+from .early_stopping import EarlyStopping
 from .checkpoint import CheckpointManager
 from .metrics import (
     count_parameters,
@@ -20,6 +21,7 @@ __all__ = [
     "setup_logger",
     "TensorBoardTracker",
     "CheckpointManager",
+    "EarlyStopping",
     "count_parameters",
     "get_flops_and_params",
     "get_binary_metrics",

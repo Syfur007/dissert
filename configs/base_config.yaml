@@ -48,6 +48,12 @@ checkpoint:
   monitor_metric: "val_dice" # Metric to monitor for best model ("val_dice", "val_miou", "val_loss")
   mode: "max"              # "max" or "min"
 
+early_stopping:
+  enabled: false           # Set to true to enable early stopping
+  patience: 20             # Epochs to wait without improvement before stopping
+  min_delta: 0.0           # Minimum absolute change to count as an improvement
+  # mode is inherited from checkpoint.mode; no need to repeat it here
+
 logging:
   log_dir: "logs"
   tb_dir: "runs"           # TensorBoard event log directory

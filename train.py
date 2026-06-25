@@ -15,6 +15,7 @@ from utils import (
     setup_logger, 
     TensorBoardTracker, 
     CheckpointManager, 
+    EarlyStopping,
     compute_dataset_metrics, 
     get_flops_and_params
 )
@@ -360,6 +361,7 @@ def run_training(config, fold=None):
     kfold_cfg = config.get('k_fold', {})
     chk_cfg = config.get('checkpoint', {})
     log_cfg = config.get('logging', {})
+    es_cfg = config.get('early_stopping', {})
     
     device = torch.device(training_cfg['device'] if torch.cuda.is_available() else "cpu")
     set_seed(training_cfg['seed'])
@@ -460,6 +462,23 @@ def run_training(config, fold=None):
         monitor_metric=chk_cfg.get('monitor_metric', 'val_dice'), 
         mode=chk_cfg.get('mode', 'max')
     )
+
+    # --- Early stopping --------------------------------------------------
+    # Inherits the same optimization direction as the checkpoint monitor so
+    # both components always agree on what "better" means.
+    es_mode = chk_cfg.get('mode', 'max')
+    early_stopper = None
+    if es_cfg.get('enabled', False):
+        early_stopper = EarlyStopping(
+            patience=es_cfg.get('patience', 20),
+            min_delta=es_cfg.get('min_delta', 0.0),
+            mode=es_mode,
+            verbose=True,
+        )
+        logger.info(
+            f"EarlyStopping enabled | patience={early_stopper.patience} | "
+            f"min_delta={early_stopper.min_delta} | mode={es_mode}"
+        )
     
     tracker = TensorBoardTracker(log_cfg['tb_dir'], experiment_name)
     
@@ -483,6 +502,12 @@ def run_training(config, fold=None):
                 # best-so-far to -inf/inf and could overwrite a genuinely
                 # better earlier checkpoint on the very next epoch.
                 chk_manager.best_metric = loaded_metric
+                # Also restore early-stopping state so patience is not
+                # accidentally reset to zero on resume, which would give the
+                # model a free pass for `patience` extra epochs regardless of
+                # how many epochs of no improvement preceded the interruption.
+                if early_stopper is not None:
+                    early_stopper.restore(best_metric=loaded_metric)
             # Note: chk_manager.load() does not currently restore GradScaler
             # state (its signature only takes model/optimizer/scheduler), so
             # a resumed AMP run starts with a fresh loss-scale factor rather
@@ -536,6 +561,13 @@ def run_training(config, fold=None):
             fold=fold,
             is_best=is_best
         )
+
+        # --- Early stopping check ----------------------------------------
+        # Evaluated after checkpointing so the best model is always saved
+        # before training halts.
+        if early_stopper is not None and early_stopper(monitored_val):
+            logger.info(f"Early stopping triggered at epoch {epoch}. Ending training.")
+            break
         
     tracker.close()
     logger.info(f"Training of {experiment_name} completed.")
