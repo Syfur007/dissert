@@ -1,5 +1,9 @@
 import time
 import numpy as np
+# Monkey-patch numpy.bool to fix medpy compatibility in newer numpy versions
+if not hasattr(np, "bool"):
+    np.bool = bool
+
 import torch
 from loguru import logger
 
