@@ -119,6 +119,44 @@ class ComboLoss(nn.Module):
 
         return self.bce_weight * ce_loss + self.dice_weight * dice_loss
 
+
+class StructureLoss(nn.Module):
+    """
+    Boundary-weighted structure loss (weighted BCE + weighted IoU), matching
+    the loss used in the official MK-UNet training script (adapted from the
+    PraNet/Polyp-PVT lineage). A local-average term up-weights pixels near
+    mask boundaries, since boundary precision is what most directly drives
+    Dice/IoU on this kind of binary segmentation task. Binary segmentation
+    only (out_channels == 1) -- use 'combo' or 'dice' for multiclass setups.
+    """
+    def __init__(self, boundary_weight=5.0, pool_kernel_size=31):
+        super().__init__()
+        self.boundary_weight = boundary_weight
+        self.pool_kernel_size = pool_kernel_size
+        self.pool_padding = pool_kernel_size // 2
+
+    def forward(self, logits, targets):
+        targets = targets.float()
+
+        # Up-weight pixels whose local neighborhood average differs from
+        # their own value -- i.e. boundary/edge pixels -- relative to
+        # uniform interior/background pixels.
+        local_avg = nn.functional.avg_pool2d(
+            targets, kernel_size=self.pool_kernel_size, stride=1, padding=self.pool_padding
+        )
+        weit = 1 + self.boundary_weight * torch.abs(local_avg - targets)
+
+        wbce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        wbce = (weit * wbce).sum(dim=(2, 3)) / weit.sum(dim=(2, 3))
+
+        probs = torch.sigmoid(logits)
+        inter = ((probs * targets) * weit).sum(dim=(2, 3))
+        union = ((probs + targets) * weit).sum(dim=(2, 3))
+        wiou = 1 - (inter + 1) / (union - inter + 1)
+
+        return (wbce + wiou).mean()
+
+
 # --- SEEDING FOR REPRODUCIBILITY ---
 def set_seed(seed):
     random.seed(seed)
@@ -134,6 +172,19 @@ def _round_to_divisor(value, divisor):
     """
     Round a spatial dimension to the nearest multiple of `divisor`, with a
     floor of one divisor unit.
+
+    MK-UNet's encoder applies 5 sequential stride-2 max-pool stages, and the
+    decoder mirrors each with a fixed 2x upsample rather than resizing to
+    match the stored skip-connection tensor. That only produces matching
+    shapes when H and W stay exact multiples of 2**5 = 32 through every
+    pooling stage. Naively truncating `h * scale` (e.g. via int()) almost
+    never lands on a multiple of 32 for scales like 0.75/1.25, causing an
+    off-by-one mismatch between the decoder path and a skip connection at
+    whichever pooling stage first hits an odd intermediate size -- this is
+    exactly the "size of tensor a (26) must match tensor b (27)" error at
+    the attention gates. Rounding to the nearest multiple of the model's
+    total stride keeps every intermediate stage even, regardless of the
+    original image size or which scale factor was sampled.
     """
     rounded = int(round(value / divisor)) * divisor
     return max(divisor, rounded)
@@ -141,68 +192,115 @@ def _round_to_divisor(value, divisor):
 
 # --- TRAINING PIPELINE LOOP ---
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger, 
-                    scaler=None, grad_clip_norm=None, multi_scale_cfg=None):
+def _apply_grad_clip(model, mode, clip_value, clip_norm):
+    """
+    Applies the configured gradient clipping strategy.
+
+    'value' (default) matches the official MK-UNet training recipe's
+    clip_gradient utility (inherited from the PraNet/Polyp-PVT lineage):
+    clamps each individual gradient element to [-clip_value, clip_value].
+    'norm' instead rescales the *entire* gradient vector by its global L2
+    norm -- a much more aggressive intervention for a network with this many
+    parameters (the global norm routinely exceeds a small max_norm even when
+    no individual gradient is large), and not what the paper's baseline uses.
+    'none' disables clipping entirely.
+    """
+    if mode == 'value':
+        torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_value)
+    elif mode == 'norm':
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
+    elif mode == 'none':
+        pass
+    else:
+        raise ValueError(f"Unknown grad_clip_mode '{mode}'. Expected 'value', 'norm', or 'none'.")
+
+
+def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, logger,
+                    scaler=None, grad_clip_mode='value', grad_clip_value=0.5, grad_clip_norm=1.0,
+                    multi_scale_cfg=None):
+    """
+    multi_scale_cfg keys:
+      enabled       (bool, default False)
+      scales        (list[float], default [0.75, 1.0, 1.25])
+      size_divisor  (int, default 32) -- snaps scaled H/W to a multiple of
+                    this so resized dimensions stay compatible with the
+                    model's stride-2 downsampling stages.
+      mode          ('all_scales' | 'random', default 'all_scales').
+                    'all_scales' matches the official MK-UNet recipe: every
+                    batch runs one full forward/backward/optimizer.step() at
+                    EACH configured scale (3 updates per batch for the
+                    default 3 scales), rather than randomly picking a single
+                    scale per batch.
+    """
     model.train()
     running_loss = 0.0
-    
-    # Extract multi-scale settings
+    running_samples = 0
+
     ms_enabled = multi_scale_cfg.get('enabled', False) if multi_scale_cfg else False
-    ms_scales = multi_scale_cfg.get('scales', [0.75, 1.0, 1.25]) if multi_scale_cfg else []
+    ms_scales = multi_scale_cfg.get('scales', [0.75, 1.0, 1.25]) if multi_scale_cfg else [1.0]
     ms_size_divisor = multi_scale_cfg.get('size_divisor', 32) if multi_scale_cfg else 32
+    ms_mode = multi_scale_cfg.get('mode', 'all_scales') if multi_scale_cfg else 'all_scales'
+
+    scales_to_run = ms_scales if ms_enabled else [1.0]
+    # Epoch-level loss tracking/logging only reflects the rate==1.0 pass,
+    # mirroring the official recipe's loss_record.update(...) under
+    # `if rate == 1:` -- backward/optimizer.step() still runs at every scale
+    # regardless, this only affects what gets averaged for the printed loss.
+    track_scale = 1.0 if 1.0 in scales_to_run else scales_to_run[-1]
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch} [Train]")
     for images, masks in pbar:
-        images = images.to(device)
-        masks = masks.to(device)
-        
-        # Apply stochastic multi-scale resizing on the current batch
-        if ms_enabled and ms_scales:
-            scale = random.choice(ms_scales)
+        images_full = images.to(device)
+        masks_full = masks.to(device)
+        h, w = images_full.shape[2], images_full.shape[3]
+
+        if ms_enabled and ms_mode == 'random':
+            scales_this_batch = [random.choice(ms_scales)]
+        else:
+            scales_this_batch = scales_to_run
+
+        last_loss_value = None
+        for scale in scales_this_batch:
             if scale != 1.0:
-                h, w = images.shape[2], images.shape[3]
                 new_h = _round_to_divisor(h * scale, ms_size_divisor)
                 new_w = _round_to_divisor(w * scale, ms_size_divisor)
-                
-                # Resize images using bilinear interpolation
                 images = nn.functional.interpolate(
-                    images, size=(new_h, new_w), mode='bilinear', align_corners=False
+                    images_full, size=(new_h, new_w), mode='bilinear', align_corners=False
                 )
-                # Resize masks using nearest neighbor to preserve discrete class labels/bounds
                 masks = nn.functional.interpolate(
-                    masks, size=(new_h, new_w), mode='nearest'
+                    masks_full, size=(new_h, new_w), mode='nearest'
                 )
+            else:
+                images, masks = images_full, masks_full
 
-        optimizer.zero_grad()
-        
-        # Mixed Precision or Full Precision Step
-        if scaler is not None:
-            with torch.cuda.amp.autocast():
+            optimizer.zero_grad()
+
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    outputs = model(images)
+                    loss = criterion(outputs, masks)
+
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                _apply_grad_clip(model, grad_clip_mode, grad_clip_value, grad_clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 outputs = model(images)
                 loss = criterion(outputs, masks)
-            
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            
-            clip_val = grad_clip_norm if grad_clip_norm is not None else 1.0
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_val)
-            
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            
-            clip_val = grad_clip_norm if grad_clip_norm is not None else 1.0
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_val)
-            
-            optimizer.step()
-            
-        running_loss += loss.item() * images.size(0)
-        pbar.set_postfix(loss=loss.item())
-        
-    return running_loss / len(dataloader.dataset)
+                loss.backward()
+
+                _apply_grad_clip(model, grad_clip_mode, grad_clip_value, grad_clip_norm)
+                optimizer.step()
+
+            last_loss_value = loss.item()
+            if scale == track_scale:
+                running_loss += last_loss_value * images.size(0)
+                running_samples += images.size(0)
+
+        pbar.set_postfix(loss=last_loss_value)
+
+    return running_loss / max(running_samples, 1)
 
 def validate(model, dataloader, criterion, device, logger, use_amp=False):
     model.eval()
@@ -301,6 +399,14 @@ def run_training(config, fold=None):
         criterion = nn.BCEWithLogitsLoss() if model_cfg['out_channels'] == 1 else CrossEntropyLossWrapper()
     elif training_cfg['loss_type'] == 'dice':
         criterion = DiceLoss()
+    elif training_cfg['loss_type'] == 'structure':
+        if model_cfg['out_channels'] != 1:
+            raise ValueError(
+                "loss_type 'structure' (boundary-weighted structure loss) only "
+                "supports binary segmentation (model.out_channels == 1). Use "
+                "'combo' or 'dice' for multiclass setups."
+            )
+        criterion = StructureLoss()
     else:
         criterion = ComboLoss(num_classes=model_cfg['out_channels'])
         
@@ -332,11 +438,20 @@ def run_training(config, fold=None):
     if use_amp:
         logger.info("Automatic Mixed Precision (AMP) training enabled.")
 
-    # training.grad_clip_norm: float, default None (disabled). Typical
-    # segmentation values are 1.0-5.0; start at 1.0 if unsure.
-    grad_clip_norm = training_cfg.get('grad_clip_norm', None)
-    if grad_clip_norm is not None:
-        logger.info(f"Gradient clipping enabled with max_norm={grad_clip_norm}")
+    # training.grad_clip_mode: 'value' (default, matches official MK-UNet
+    # recipe's clip_gradient) | 'norm' | 'none'.
+    # training.grad_clip_value: used when mode == 'value'. Default 0.5 matches
+    # the official MK-UNet/PraNet/Polyp-PVT recipe's opt.clip default.
+    # training.grad_clip_norm: used when mode == 'norm'. Typical values 1.0-5.0.
+    grad_clip_mode = training_cfg.get('grad_clip_mode', 'value')
+    grad_clip_value = training_cfg.get('grad_clip_value', 0.5)
+    grad_clip_norm = training_cfg.get('grad_clip_norm', 1.0)
+    if grad_clip_mode == 'value':
+        logger.info(f"Gradient clipping enabled | mode=value | clip_value={grad_clip_value}")
+    elif grad_clip_mode == 'norm':
+        logger.info(f"Gradient clipping enabled | mode=norm | max_norm={grad_clip_norm}")
+    else:
+        logger.info("Gradient clipping disabled.")
 
     # Checkpoint and Experiment tracking managers
     checkpoint_dir = os.path.join(chk_cfg.get('save_dir', 'checkpoints'), log_cfg['experiment_name'])
@@ -384,8 +499,9 @@ def run_training(config, fold=None):
     for epoch in range(start_epoch, training_cfg['epochs'] + 1):
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, logger,
-            scaler=scaler, grad_clip_norm=grad_clip_norm,
-            multi_scale_cfg=training_cfg.get('multi_scale', None) # <-- Added here
+            scaler=scaler,
+            grad_clip_mode=grad_clip_mode, grad_clip_value=grad_clip_value, grad_clip_norm=grad_clip_norm,
+            multi_scale_cfg=training_cfg.get('multi_scale', None)
         )
         val_metrics = validate(model, val_loader, criterion, device, logger, use_amp=use_amp)
         
@@ -438,7 +554,12 @@ def parse_args():
     parser.add_argument("--model", type=str, default=None, help="Override model architecture name")
     parser.add_argument("--dataset_dir", type=str, default=None, help="Override dataset directory")
     parser.add_argument("--amp", action="store_true", help="Enable Automatic Mixed Precision training")
-    parser.add_argument("--grad-clip-norm", type=float, default=None, help="Override gradient clipping max norm")
+    parser.add_argument("--grad-clip-mode", type=str, default=None, choices=['value', 'norm', 'none'],
+                        help="Override gradient clipping mode (default: value, matching official MK-UNet recipe)")
+    parser.add_argument("--grad-clip-value", type=float, default=None,
+                        help="Override gradient clip value (used when grad-clip-mode=value)")
+    parser.add_argument("--grad-clip-norm", type=float, default=None,
+                        help="Override gradient clip max norm (used when grad-clip-mode=norm)")
     return parser.parse_args()
 
 def main():
@@ -466,6 +587,10 @@ def main():
         config['dataset']['root'] = args.dataset_dir
     if args.amp:
         config['training']['amp'] = True
+    if args.grad_clip_mode is not None:
+        config['training']['grad_clip_mode'] = args.grad_clip_mode
+    if args.grad_clip_value is not None:
+        config['training']['grad_clip_value'] = args.grad_clip_value
     if args.grad_clip_norm is not None:
         config['training']['grad_clip_norm'] = args.grad_clip_norm
         
@@ -481,7 +606,7 @@ def main():
         for f in run_folds:
             print(f"\n=================== TRAINING FOLD {f} ===================")
             best_score = run_training(config, fold=f)
-            fold_scores.append(best_score)  
+            fold_scores.append(best_score)
             
         print("\n=================== K-FOLD SUMMARY ===================")
         print(f"Monitored metric ({config['checkpoint']['monitor_metric']}) across folds:")
