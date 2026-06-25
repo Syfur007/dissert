@@ -6,15 +6,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-from tabulate import tabulate
 
 from models import get_model
 from datasets import SegmentationDataModule
 from utils import (
-    setup_logger, 
-    compute_dataset_metrics, 
-    get_flops_and_params, 
-    measure_throughput
+    setup_logger,
+    compute_dataset_metrics,
+    get_flops_and_params,
+    measure_throughput,
+    EvaluationReporter,
 )
 
 
@@ -73,7 +73,12 @@ def load_checkpoint_into(model, checkpoint_path, device, logger):
 
 def evaluate(model, dataloader, device, is_multiclass=False):
     """
-    Evaluate a model (single model or EnsembleModel) on a dataset and return metrics.
+    Evaluate a model (single model or EnsembleModel) on a dataset.
+
+    Returns:
+        metrics (dict): Averaged Dice/mIoU/HD95/ASD across the test set.
+        preds_list (list): Raw per-image numpy predictions (for extended metrics).
+        gts_list (list): Raw per-image numpy ground-truth masks.
     """
     preds_list = []
     gts_list = []
@@ -104,7 +109,7 @@ def evaluate(model, dataloader, device, is_multiclass=False):
 
     # Calculate Dice, IoU, HD95, ASD
     metrics = compute_dataset_metrics(preds_list, gts_list)
-    return metrics
+    return metrics, preds_list, gts_list
 
 
 def main():
@@ -205,44 +210,40 @@ def main():
     logger.info("Measuring inference throughput...")
     throughput = measure_throughput(model, test_loader, device)
 
+    # Build the reporter early so latency measurement happens before the eval loop
+    reporter = EvaluationReporter(config, args, logger)
+    reporter.set_model_info(
+        model=model,
+        flops=flops,
+        params=params,
+        throughput=throughput,
+        checkpoint_path=chk_path if not args.ensemble else checkpoint_dir,
+        measure_latency=True,
+    )
+
     # Run evaluation
     logger.info("Starting test set evaluation...")
     start_eval_time = time.time()
 
-    metrics = evaluate(model, test_loader, device, is_multiclass=is_multiclass)
+    metrics, preds_list, gts_list = evaluate(model, test_loader, device, is_multiclass=is_multiclass)
 
     eval_duration = time.time() - start_eval_time
     logger.info(f"Evaluation finished in {eval_duration:.2f} seconds.")
 
-    # Prepare table output
-    table_data = [
-        ["Metric", "Value"],
-        ["Model Architecture", model_cfg['name']],
-        ["Dataset Name", dataset_cfg['name']],
-        ["DICE Score (F1)", f"{metrics['dice']:.4f}"],
-        ["mean IoU (mIoU)", f"{metrics['miou']:.4f}"],
-        ["HD95 (Hausdorff Distance 95%)", f"{metrics['hd95']:.2f} px" if metrics['hd95'] > 0 else "N/A"],
-        ["ASD (Asymmetric Surface Distance)", f"{metrics['asd']:.2f} px" if metrics['asd'] > 0 else "N/A"],
-        ["Parameters Count", f"{params:,}"],
-        ["FLOPs Count", f"{flops:,}"],
-        ["Throughput (FPS)", f"{throughput:.2f} img/sec"]
-    ]
+    # Populate remaining results and render reports
+    reporter.set_eval_results(
+        base_metrics=metrics,
+        preds=preds_list,
+        gts=gts_list,
+        num_samples=len(test_loader.dataset),
+        eval_duration_s=eval_duration,
+    )
 
-    print("\n" + "="*50)
-    print("                EVALUATION REPORT")
-    print("="*50)
-    print(tabulate(table_data, headers="firstrow", tablefmt="github"))
-    print("="*50 + "\n")
-
-    # Save markdown report to disk
-    report_ensemble = "ensemble_" if args.ensemble else ""
-    report_path = os.path.join(log_cfg['log_dir'], f"{log_cfg['experiment_name']}_{report_ensemble}report.md")
-    with open(report_path, 'w') as f:
-        f.write(f"# Evaluation Report - {log_cfg['experiment_name']}\n\n")
-        f.write(tabulate(table_data, headers="firstrow", tablefmt="github"))
-        f.write("\n")
-
-    logger.info(f"Saved markdown report to {report_path}")
+    reporter.print_console()
+    reporter.save(
+        report_dir=log_cfg['log_dir'],
+        filename_prefix=log_cfg['experiment_name'],
+    )
 
 
 if __name__ == "__main__":
