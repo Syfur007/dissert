@@ -61,7 +61,7 @@ checkpoint:
 
 early_stopping:
   enabled: true            # Enable early stopping to avoid overfitting on long runs
-  patience: 30             # 200-epoch budget; 30 epochs no improvement → stop
+  patience: 15             # 200-epoch budget; 15 epochs no improvement → stop
   min_delta: 0.0001        # Ignore sub-0.01% Dice improvements (floating-point noise)
 
 logging:

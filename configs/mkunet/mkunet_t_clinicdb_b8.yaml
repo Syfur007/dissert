@@ -38,7 +38,7 @@ training:
   loss_type: "structure"       # "bce", "dice", "combo" (BCE + Dice), "structure" (Structure Loss)
   device: "cuda"           # "cuda" or "cpu"
   seed: 42
-  amp: true               # default: false
+  amp: true                # default: false
   grad_clip_mode: value    # default — matches official MK-UNet's clip_gradient
   grad_clip_value: 0.5     # default — matches their opt.clip default
   # grad_clip_norm: 1.0    # only used if grad_clip_mode to 'norm'
@@ -61,9 +61,8 @@ checkpoint:
 
 early_stopping:
   enabled: true            # Enable early stopping to avoid overfitting on long runs
-  patience: 30             # 200-epoch budget; 30 epochs no improvement → stop
+  patience: 15             # 200-epoch budget; 15 epochs no improvement → stop
   min_delta: 0.0001        # Ignore sub-0.01% Dice improvements (floating-point noise)
-
 
 logging:
   log_dir: "logs"
