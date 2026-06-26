@@ -160,12 +160,14 @@ def main():
         logger.info(f"Loading ensemble models from all {n_splits} folds...")
 
         fold_models = []
+        loaded_checkpoint_paths = []
         for f in range(n_splits):
             fold_chk_path = os.path.join(checkpoint_dir, f"best_fold{f}.pth")
             if os.path.exists(fold_chk_path):
                 model_f = get_model(**model_cfg).to(device)
                 model_f = load_checkpoint_into(model_f, fold_chk_path, device, logger)
                 fold_models.append(model_f)
+                loaded_checkpoint_paths.append(fold_chk_path)
                 logger.info(f"Loaded fold {f} from {fold_chk_path}")
             else:
                 logger.warning(f"Could not find checkpoint for fold {f} at {fold_chk_path}. Skipping.")
@@ -210,14 +212,17 @@ def main():
     logger.info("Measuring inference throughput...")
     throughput = measure_throughput(model, test_loader, device)
 
-    # Build the reporter early so latency measurement happens before the eval loop
+    # Build the reporter early so latency measurement happens before the eval loop.
+    # checkpoint_path is a list of fold files in ensemble mode -- passing the
+    # directory here previously made get_model_disk_size() report the
+    # directory inode size instead of the combined checkpoint size.
     reporter = EvaluationReporter(config, args, logger)
     reporter.set_model_info(
         model=model,
         flops=flops,
         params=params,
         throughput=throughput,
-        checkpoint_path=chk_path if not args.ensemble else checkpoint_dir,
+        checkpoint_path=loaded_checkpoint_paths if args.ensemble else chk_path,
         measure_latency=True,
     )
 
@@ -237,6 +242,7 @@ def main():
         gts=gts_list,
         num_samples=len(test_loader.dataset),
         eval_duration_s=eval_duration,
+        is_multiclass=is_multiclass,
     )
 
     reporter.print_console()

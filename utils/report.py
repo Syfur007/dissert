@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import yaml
 
 try:
     from tabulate import tabulate
@@ -140,12 +141,19 @@ def compute_extended_metrics(preds: list, gts: list) -> dict:
 # Model introspection helpers
 # ---------------------------------------------------------------------------
 
-def get_model_disk_size(checkpoint_path: str) -> int:
-    """Return on-disk checkpoint file size in bytes, or 0 if unavailable."""
-    try:
-        return os.path.getsize(checkpoint_path)
-    except (OSError, TypeError):
-        return 0
+def get_model_disk_size(checkpoint_path) -> int:
+    """Return on-disk checkpoint size in bytes. Accepts a single path or a
+    list of paths; sums across the list (e.g. all fold checkpoints in an
+    ensemble -- os.path.getsize() on a directory silently returns the
+    directory inode size, not the contained files' size)."""
+    paths = checkpoint_path if isinstance(checkpoint_path, (list, tuple)) else [checkpoint_path]
+    total = 0
+    for p in paths:
+        try:
+            total += os.path.getsize(p)
+        except (OSError, TypeError):
+            pass
+    return total
 
 
 def get_model_memory_size(model: nn.Module) -> int:
@@ -275,12 +283,14 @@ class EvaluationReporter:
         self._model_mem_size   = 0
         self._latency          = {}
         self._gpu_mem          = {}
+        self._device           = None
 
         # Filled by set_eval_results()
         self._metrics_base     = {}
         self._metrics_ext      = {}
         self._num_samples      = 0
         self._eval_duration_s  = 0.0
+        self._is_multiclass    = False
 
         # Ensemble flag
         self._is_ensemble = getattr(args, "ensemble", False)
@@ -315,7 +325,8 @@ class EvaluationReporter:
         self._checkpoint_path = checkpoint_path
         self._checkpoint_size = get_model_disk_size(checkpoint_path)
         self._model_mem_size  = get_model_memory_size(model)
-        self._gpu_mem = get_gpu_memory_usage(next(model.parameters()).device)
+        self._device = next(model.parameters()).device
+        self._gpu_mem = get_gpu_memory_usage(self._device)
 
         if measure_latency:
             device = next(model.parameters()).device
@@ -342,6 +353,7 @@ class EvaluationReporter:
         gts: list,
         num_samples: int,
         eval_duration_s: float,
+        is_multiclass: bool = False,
     ):
         """
         Populate evaluation results.
@@ -352,12 +364,17 @@ class EvaluationReporter:
             gts:             Raw ground-truth list (for extended metric computation).
             num_samples:     Number of test images evaluated.
             eval_duration_s: Wall-clock seconds the evaluation loop took.
+            is_multiclass:   Precision/Recall/Specificity/F2 assume binary
+                             masks (bool cast); for multiclass label maps this
+                             would silently collapse all foreground classes
+                             into one, so they're skipped instead.
         """
         self._metrics_base    = base_metrics
         self._num_samples     = num_samples
         self._eval_duration_s = eval_duration_s
+        self._is_multiclass   = is_multiclass
 
-        if preds and gts:
+        if preds and gts and not is_multiclass:
             try:
                 self._metrics_ext = compute_extended_metrics(preds, gts)
             except Exception as exc:
@@ -367,38 +384,51 @@ class EvaluationReporter:
         else:
             self._metrics_ext = {}
 
+        # set_model_info() snapshots GPU memory before the main eval loop
+        # (so latency measurement isn't contaminated by it), which means it
+        # misses the loop that usually drives actual peak usage. Re-snapshot
+        # now that the full pass has run.
+        if self._device is not None:
+            self._gpu_mem = get_gpu_memory_usage(self._device)
+        else:
+            self._metrics_ext = {}
+
     # ------------------------------------------------------------------
     # Rendering helpers
     # ------------------------------------------------------------------
 
+    def _config_yaml(self) -> str:
+        """Full config as valid YAML text (handles arbitrary nesting, unlike
+        a hand-rolled one-level dict loop)."""
+        return yaml.safe_dump(self.config, sort_keys=False, default_flow_style=False)
+
     def _config_section_md(self) -> str:
-        """Render full config as a fenced YAML block."""
-        lines = ["## Full Configuration\n", "```yaml"]
-        for section, values in self.config.items():
-            lines.append(f"\n# --- {section} ---")
-            if isinstance(values, dict):
-                for k, v in values.items():
-                    lines.append(f"{k}: {v}")
-            else:
-                lines.append(f"{section}: {values}")
-        lines.append("```\n")
-        return "\n".join(lines)
+        return "## Experiment Configuration\n\n```yaml\n" + self._config_yaml() + "```\n"
+
+    def _checkpoint_display(self) -> str:
+        cp = self._checkpoint_path
+        if isinstance(cp, (list, tuple)):
+            if not cp:
+                return "N/A"
+            return f"{len(cp)} fold checkpoints (dir: {os.path.dirname(cp[0])})"
+        return cp or "N/A"
 
     def _metrics_table(self) -> list:
         """Build a flat list-of-rows for tabulate."""
         m   = self._metrics_base
         ext = self._metrics_ext
+        ext_note = " (N/A — multiclass)" if self._is_multiclass else ""
 
         rows = [
             # --- Segmentation quality ---
             ["━━ SEGMENTATION QUALITY ━━", ""],
             ["Dice / F1-Score",          _safe_fmt(m.get("dice"),  ".4f")],
             ["mean IoU (mIoU)",          _safe_fmt(m.get("miou"),  ".4f")],
-            ["Precision",                _safe_fmt(ext.get("precision"),   ".4f")],
-            ["Recall (Sensitivity)",     _safe_fmt(ext.get("recall"),      ".4f")],
-            ["Specificity",              _safe_fmt(ext.get("specificity"), ".4f")],
-            ["F2-Score (β=2)",           _safe_fmt(ext.get("f2"),          ".4f")],
-            ["Pixel Accuracy",           _safe_fmt(ext.get("accuracy"),    ".4f")],
+            ["Precision" + ext_note,                _safe_fmt(ext.get("precision"),   ".4f")],
+            ["Recall (Sensitivity)" + ext_note,      _safe_fmt(ext.get("recall"),      ".4f")],
+            ["Specificity" + ext_note,               _safe_fmt(ext.get("specificity"), ".4f")],
+            ["F2-Score (β=2)" + ext_note,            _safe_fmt(ext.get("f2"),          ".4f")],
+            ["Pixel Accuracy" + ext_note,            _safe_fmt(ext.get("accuracy"),    ".4f")],
             ["HD95 (Hausdorff 95%)",
              f"{m.get('hd95'):.2f} px" if (m.get("hd95", 0) > 0) else "N/A"],
             ["ASD (Avg Surface Dist)",
@@ -411,7 +441,7 @@ class EvaluationReporter:
             ["Mode",                     "Ensemble" if self._is_ensemble else "Single"],
             ["Test Samples",             f"{self._num_samples:,}"],
             ["Eval Duration",            f"{self._eval_duration_s:.2f} s"],
-            ["Checkpoint",               self._checkpoint_path or "N/A"],
+            ["Checkpoint",               self._checkpoint_display()],
 
             # --- Model size ---
             ["━━ MODEL SIZE ━━", ""],
@@ -472,6 +502,9 @@ class EvaluationReporter:
         print(f"\n{border}")
         exp_name = self.config.get("logging", {}).get("experiment_name", "Evaluation")
         print(f"  EVALUATION REPORT — {exp_name}".center(68))
+        print(border)
+        print("\n-- Experiment Configuration --\n")
+        print(self._config_yaml())
         print(border)
 
         if _TABULATE:
@@ -534,9 +567,11 @@ class EvaluationReporter:
 
     def _write_json(self, path: str):
         data = {
+            "config":      self.config,
             "experiment":  self.config.get("logging", {}).get("experiment_name", ""),
             "timestamp":   self._env.get("timestamp", ""),
             "is_ensemble": self._is_ensemble,
+            "is_multiclass": self._is_multiclass,
             "checkpoint":  self._checkpoint_path,
             "num_samples": self._num_samples,
             "eval_duration_s": self._eval_duration_s,
@@ -561,7 +596,6 @@ class EvaluationReporter:
                 "gpu_memory_mb":  self._gpu_mem,
             },
             "environment": self._env,
-            "config":      self.config,
         }
 
         with open(path, "w") as fh:
