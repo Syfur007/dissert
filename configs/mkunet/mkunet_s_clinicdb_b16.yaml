@@ -1,7 +1,7 @@
 # Configuration settings for Deep Learning Segmentation Pipeline
 
 model:
-  name: "mk_unet_t"             # "unet", "attention_unet", or "mk_unet"
+  name: "mk_unet_s"             # "unet", "attention_unet", or "mk_unet"
   in_channels: 3
   out_channels: 1          # 1 for binary segmentation, >1 for multi-class
   channels: [8, 16, 32, 48, 80] 
