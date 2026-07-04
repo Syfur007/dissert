@@ -69,4 +69,5 @@ class MedicalSegmentationDataset(Dataset):
         if mask.max() > 1.0:
             mask = mask / 255.0
             
+        mask = mask.float()
         return image, mask
