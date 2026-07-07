@@ -5,13 +5,17 @@ from .baseline.mk_unet import MK_UNet_S
 from .baseline.mk_unet import MK_UNet_T
 from .baseline.emcad import EMCADNet
 
+from .proposed.gmk_unet import GMK_UNet
+
 MODEL_REGISTRY = {
     "unet": UNet,
     "attention_unet": AttentionUNet,
     "mk_unet": MK_UNet,
     "mk_unet_s": MK_UNet_S,
     "mk_unet_t": MK_UNet_T,
-    "emcad": EMCADNet
+    "emcad": EMCADNet,
+
+    "gmk_unet": GMK_UNet,
 }
 
 def get_model(**kwargs):
