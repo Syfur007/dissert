@@ -9,11 +9,12 @@ model:
   kernel_sizes: [1, 3, 5]       # MKDC kernel sizes 
   expansion_factor: 2
   gag_kernel: 3
+  use_rgb_skip: true
 
 
 dataset:
-  name: "ClinicDB"           # Dataset name — must match a registered handler (clinicdb, colondb)
-  root: "data/polyp/ClinicDB" # Root directory; handler derives split subdirs automatically
+  name: "ClinicDB"
+  root: "data/polyp/ClinicDB"
 
   # Optional: override the list files used for each split (defaults are inside root/)
   # train_list: "data/polyp/ClinicDB/train_list_clinicdb.txt"
@@ -32,8 +33,8 @@ training:
   weight_decay: 0.0001
   momentum: 0.9            # for SGD
   scheduler: "cosine"      # "cosine", "step", "none"
-  lr_step_size: 10         # for StepLR
-  lr_gamma: 0.5            # for StepLR
+  lr_step_size: 10         
+  lr_gamma: 0.5            
   warmup_epochs: 5         # learning rate warmup
   loss_type: "structure"       # "bce", "dice", "combo" (BCE + Dice), "structure" (Structure Loss)
   device: "cuda"           # "cuda" or "cpu"
