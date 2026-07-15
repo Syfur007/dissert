@@ -64,10 +64,10 @@ class ColonDB:
     # Public API
     # ------------------------------------------------------------------
 
-    def get_dataset(self, split: str, transform=None) -> MedicalSegmentationDataset:
+    def get_dataset(self, split: str, transform=None, **kwargs) -> MedicalSegmentationDataset:
         """Return a ``MedicalSegmentationDataset`` for *split* ('train'/'val'/'test')."""
         img_dir, mask_dir, names = self._resolve_files(split)
-        return MedicalSegmentationDataset(img_dir, mask_dir, filenames=names, transform=transform)
+        return MedicalSegmentationDataset(img_dir, mask_dir, filenames=names, transform=transform, **kwargs)
 
     def get_kfold_pairs(self) -> list:
         """

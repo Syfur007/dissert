@@ -8,7 +8,7 @@ import numpy as np
 from tqdm import tqdm
 
 from models import get_model
-from datasets import SegmentationDataModule
+from datasets import StandardSplitDataModule
 from utils import (
     setup_logger,
     compute_dataset_metrics,
@@ -138,7 +138,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Init Datamodule
-    dm = SegmentationDataModule(config)
+    dm = StandardSplitDataModule(config)
     test_loader = dm.get_test_loader()
 
     if test_loader is None:

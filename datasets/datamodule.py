@@ -1,107 +1,175 @@
 """
-Unified data module for medical image segmentation.
+Data module hierarchy for medical image segmentation.
 
-Flow
-----
-Standard  : handler.get_dataset('train'/'val'/'test') → pre-defined split lists
-K-Fold    : handler.get_kfold_pairs() → merge train+val → KFold → save to JSON
-              On resume the JSON is re-loaded, so fold assignments are stable.
+Classes
+-------
+BaseDataModule
+    Shared init: stride-snapping, transform wiring (via build_transforms),
+    seeded DataLoader factory.
+
+StandardSplitDataModule(BaseDataModule)
+    Uses pre-defined train/val/test splits from a registered dataset handler.
+    Falls back to auto-partitioning a flat directory when ``dataset.split``
+    ratios are provided and no registered handler matches.
+
+KFoldDataModule(BaseDataModule)
+    K-fold cross-validation with stable fold persistence (fold assignments
+    are serialised to JSON on first run and reloaded on resume).
+
+Dataset handler registry
+------------------------
+Add new handlers to ``DATASETS`` dict; each must implement:
+    get_dataset(split, transform, **kwargs) → MedicalSegmentationDataset
+    get_kfold_pairs()                       → list of [img_path, mask_path]
 """
+import math
 import os
 import json
+import random
+
 import numpy as np
+import torch
 from loguru import logger
-from torch.utils.data import DataLoader
 from sklearn.model_selection import KFold
+from torch.utils.data import DataLoader
 
 from .dataset import MedicalSegmentationDataset
-from .transforms import get_train_transforms, get_val_transforms
+from .transforms import build_transforms
 from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
 
-# Stride of the deepest encoder downsampling path.  MK-UNet applies 5
-# sequential stride-2 max-pool stages, so every spatial dimension fed to
-# the model must be an exact multiple of 2**5 = 32.
 _MODEL_STRIDE = 32
 
-
-def _snap_to_stride(value: int, stride: int = _MODEL_STRIDE) -> int:
-    """Round *value* to the nearest positive multiple of *stride*."""
-    snapped = int(round(value / stride)) * stride
-    return max(stride, snapped)
-
-# ── Registry ────────────────────────────────────────────────────────────────
 DATASETS: dict = {
     ClinicDB.NAME: ClinicDB,
     ColonDB.NAME:  ColonDB,
 }
 
 
-class SegmentationDataModule:
-    """
-    Unified data module. Selects the right dataset handler by ``config.dataset.name``.
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
-    Public API (unchanged from before):
-        get_standard_loaders()       → (train_loader, val_loader)
-        get_fold_loaders(fold_idx)   → (train_loader, val_loader)
-        get_test_loader()            → test_loader | None
+def _snap_to_stride(value: int, stride: int = _MODEL_STRIDE) -> int:
+    """Round *value* to the nearest positive multiple of *stride*."""
+    return max(stride, int(round(value / stride)) * stride)
+
+
+def _make_worker_init_fn(base_seed: int):
+    """Return a DataLoader worker initialiser that seeds each worker reproducibly."""
+    def worker_init_fn(worker_id: int):
+        seed = base_seed + worker_id
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+    return worker_init_fn
+
+
+# ── Generic flat-directory handler ──────────────────────────────────────────
+
+class _GenericHandler:
+    """
+    Handler for datasets that ship as a flat ``images/`` + ``masks/``
+    directory without pre-made train/val/test sub-trees.
+
+    Requires ``dataset.split: {train: 0.8, val: 0.1, test: 0.1}`` in config.
+    Files are shuffled with the training seed for reproducibility.
+    """
+
+    def __init__(self, cfg: dict, seed: int):
+        split_ratios = cfg.get("split")
+        if not split_ratios:
+            raise ValueError(
+                "Dataset not registered and 'dataset.split' is absent. "
+                "Add 'split: {train: 0.8, val: 0.1, test: 0.1}' to your config "
+                "or register a handler in datasets/datamodule.py."
+            )
+        root     = cfg["root"]
+        img_dir  = os.path.join(root, "images")
+        mask_dir = os.path.join(root, "masks")
+        if not os.path.isdir(img_dir) or not os.path.isdir(mask_dir):
+            raise FileNotFoundError(
+                f"Expected '{img_dir}' and '{mask_dir}' to exist for generic auto-split."
+            )
+
+        all_names = sorted(
+            f for f in os.listdir(img_dir) if os.path.isfile(os.path.join(img_dir, f))
+        )
+        rng     = np.random.default_rng(seed)
+        indices = rng.permutation(len(all_names))
+
+        n       = len(all_names)
+        n_train = math.floor(split_ratios.get("train", 0.8) * n)
+        n_val   = math.floor(split_ratios.get("val",   0.1) * n)
+
+        self._splits = {
+            "train": [all_names[i] for i in indices[:n_train]],
+            "val":   [all_names[i] for i in indices[n_train : n_train + n_val]],
+            "test":  [all_names[i] for i in indices[n_train + n_val :]],
+        }
+        self._img_dir  = img_dir
+        self._mask_dir = mask_dir
+
+    def get_dataset(self, split: str, transform=None, **kwargs) -> MedicalSegmentationDataset:
+        return MedicalSegmentationDataset(
+            self._img_dir, self._mask_dir,
+            filenames=self._splits[split],
+            transform=transform,
+            **kwargs,
+        )
+
+
+# ── Base ─────────────────────────────────────────────────────────────────────
+
+class BaseDataModule:
+    """
+    Shared initialisation for all data module subclasses.
+
+    Responsibilities
+    ----------------
+    - Snap spatial dims to the model's stride (multiple-of-32 requirement).
+    - Build train/val transforms from ``ds_cfg`` via ``build_transforms``.
+    - Provide a seeded ``_make_loader`` factory so every DataLoader gets
+      reproducible worker seeds.
     """
 
     def __init__(self, config: dict):
-        self.config  = config
-        ds_cfg       = config["dataset"]
-        self.kf_cfg  = config.get("k_fold", {})
+        self.config = config
+        ds_cfg      = config["dataset"]
+        self._seed  = config.get("training", {}).get("seed", 42)
 
-        name = ds_cfg["name"].lower()
-        if name not in DATASETS:
-            raise ValueError(f"Unknown dataset '{name}'. Registered: {list(DATASETS)}")
-
-        self.handler = DATASETS[name](ds_cfg)
-
-        # snap spatial dims to the model's stride at init ---
-        # This must happen unconditionally (not only in the multi-scale branch)
-        # so that standard training with an arbitrary config image size never
-        # reaches the decoder with a dimension that isn't divisible by 32.
-        raw_h = ds_cfg["img_height"]
-        raw_w = ds_cfg["img_width"]
+        # ── Stride alignment ─────────────────────────────────────────────
+        raw_h, raw_w = ds_cfg["img_height"], ds_cfg["img_width"]
         h = _snap_to_stride(raw_h)
         w = _snap_to_stride(raw_w)
-
-        if h % _MODEL_STRIDE != 0 or w % _MODEL_STRIDE != 0:
-            raise ValueError(
-                f"Resolved image size ({h}x{w}) is not divisible by {_MODEL_STRIDE}. "
-                f"Check dataset.img_height ({raw_h}) and dataset.img_width ({raw_w}) "
-                f"in your config."
-            )
 
         if h != raw_h or w != raw_w:
             logger.info(
                 f"Image size snapped to nearest multiple of {_MODEL_STRIDE}: "
-                f"({raw_h}x{raw_w}) → ({h}x{w})."
+                f"({raw_h}×{raw_w}) → ({h}×{w})."
             )
         else:
-            logger.info(f"Image size {h}x{w} is already aligned to stride {_MODEL_STRIDE}.")
+            logger.info(f"Image size {h}×{w} is aligned to stride {_MODEL_STRIDE}.")
 
-        # Write snapped values back so the rest of the pipeline (FLOPs
-        # computation, logging, etc.) sees the resolved size.
+        # Write resolved dims back so the rest of the pipeline sees them.
         ds_cfg["img_height"] = h
         ds_cfg["img_width"]  = w
 
-        self._train_tf = get_train_transforms(h, w)
-        self._val_tf   = get_val_transforms(h, w)
+        # ── Transforms ───────────────────────────────────────────────────
+        self._train_tf, self._val_tf = build_transforms(h, w, ds_cfg)
 
+        # ── DataLoader shared kwargs ──────────────────────────────────────
         self._ldr_kw = dict(
-            batch_size  = ds_cfg["batch_size"],
-            num_workers = ds_cfg["num_workers"],
-            pin_memory  = True,
+            batch_size     = ds_cfg["batch_size"],
+            num_workers    = ds_cfg["num_workers"],
+            pin_memory     = True,
+            worker_init_fn = _make_worker_init_fn(self._seed),
         )
 
-        # Path for persisting fold splits (enables training resume)
-        exp_name       = config.get("logging", {}).get("experiment_name", "experiment")
-        save_dir       = config.get("checkpoint", {}).get("save_dir", "checkpoints")
-        self._fold_file = os.path.join(save_dir, exp_name, "fold_splits.json")
-
-    # ── Internal helpers ─────────────────────────────────────────────────────
+        # ── Dataset construction kwargs (validate / cache) ────────────────
+        self._ds_kwargs = dict(
+            validate            = ds_cfg.get("validate", False),
+            cache               = ds_cfg.get("cache", False),
+            cache_size_limit_gb = ds_cfg.get("cache_size_limit_gb", 4.0),
+        )
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
         return DataLoader(
@@ -111,57 +179,117 @@ class SegmentationDataModule:
             **self._ldr_kw,
         )
 
+
+# ── Standard split ────────────────────────────────────────────────────────────
+
+class StandardSplitDataModule(BaseDataModule):
+    """
+    Data module for datasets with pre-defined train/val/test splits.
+
+    If the dataset name is not in the registry *and* ``dataset.split``
+    ratios are configured, falls back to ``_GenericHandler`` which
+    auto-partitions a flat ``images/`` + ``masks/`` directory.
+    """
+
+    def __init__(self, config: dict):
+        super().__init__(config)
+        ds_cfg = config["dataset"]
+        name   = ds_cfg["name"].lower()
+
+        if name in DATASETS:
+            self.handler = DATASETS[name](ds_cfg)
+        else:
+            logger.info(
+                f"Dataset '{name}' not in registry; "
+                "falling back to generic auto-split handler."
+            )
+            self.handler = _GenericHandler(ds_cfg, self._seed)
+
+    def get_standard_loaders(self):
+        """Return ``(train_loader, val_loader)``."""
+        train_ds = self.handler.get_dataset("train", self._train_tf, **self._ds_kwargs)
+        val_ds   = self.handler.get_dataset("val",   self._val_tf,   **self._ds_kwargs)
+        return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
+
+    def get_test_loader(self):
+        """Return the test DataLoader, or ``None`` if no test samples exist."""
+        test_ds = self.handler.get_dataset("test", self._val_tf, **self._ds_kwargs)
+        return self._make_loader(test_ds, False) if len(test_ds) > 0 else None
+
+
+# ── K-Fold ────────────────────────────────────────────────────────────────────
+
+class KFoldDataModule(BaseDataModule):
+    """
+    Data module for k-fold cross-validation.
+
+    Fold assignments are serialised to ``<checkpoint_dir>/<exp>/fold_splits.json``
+    on the first call to ``get_fold_loaders`` and reloaded on subsequent calls,
+    so resumed runs always use the same split.
+    """
+
+    def __init__(self, config: dict):
+        super().__init__(config)
+        ds_cfg = config["dataset"]
+        name   = ds_cfg["name"].lower()
+
+        if name not in DATASETS:
+            raise ValueError(
+                f"KFoldDataModule requires a registered dataset handler. "
+                f"Got '{name}'. Registered: {list(DATASETS)}. "
+                f"K-Fold is not supported for generic auto-split datasets."
+            )
+
+        self.handler = DATASETS[name](ds_cfg)
+        self.kf_cfg  = config.get("k_fold", {})
+
+        exp_name        = config.get("logging", {}).get("experiment_name", "experiment")
+        save_dir        = config.get("checkpoint", {}).get("save_dir", "checkpoints")
+        self._fold_file = os.path.join(save_dir, exp_name, "fold_splits.json")
+
     def _load_or_create_fold_splits(self) -> list:
         """
-        Load fold splits from disk if they exist, otherwise compute and save them.
-        Returns a list of dicts: [{'train': [...], 'val': [...]}, ...]
-        Each inner list contains [img_path, mask_path] pairs (lists, not tuples, for JSON).
+        Load fold splits from disk if available, otherwise compute and persist them.
+        Returns a list of dicts: ``[{'train': [[img, mask], ...], 'val': [...]}, ...]``.
         """
         if os.path.exists(self._fold_file):
             with open(self._fold_file) as f:
                 return json.load(f)["folds"]
 
-        n_splits = self.kf_cfg.get("n_splits", 5)
-        seed     = self.config["training"].get("seed", 42)
-        all_pairs = np.array(self.handler.get_kfold_pairs())  # shape (N, 2)
-
+        n_splits  = self.kf_cfg.get("n_splits", 5)
+        all_pairs = np.array(self.handler.get_kfold_pairs())
         if len(all_pairs) == 0:
             raise RuntimeError("No samples found for k-fold splitting.")
 
-        kf     = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        folds  = [
+        kf    = KFold(n_splits=n_splits, shuffle=True, random_state=self._seed)
+        folds = [
             {"train": all_pairs[ti].tolist(), "val": all_pairs[vi].tolist()}
             for ti, vi in kf.split(all_pairs)
         ]
 
         os.makedirs(os.path.dirname(self._fold_file), exist_ok=True)
         with open(self._fold_file, "w") as f:
-            json.dump({"n_splits": n_splits, "seed": seed, "folds": folds}, f)
+            json.dump({"n_splits": n_splits, "seed": self._seed, "folds": folds}, f)
 
         return folds
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def get_standard_loaders(self):
-        """Return (train_loader, val_loader) using the dataset's pre-defined splits."""
-        train_ds = self.handler.get_dataset("train", self._train_tf)
-        val_ds   = self.handler.get_dataset("val",   self._val_tf)
-        return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
-
     def get_fold_loaders(self, fold_idx: int):
-        """Return (train_loader, val_loader) for a specific k-fold index."""
-        folds    = self._load_or_create_fold_splits()
-        n_splits = self.kf_cfg.get("n_splits", len(folds))
-
+        """Return ``(train_loader, val_loader)`` for *fold_idx*."""
+        folds = self._load_or_create_fold_splits()
         if not (0 <= fold_idx < len(folds)):
-            raise ValueError(f"fold_idx {fold_idx} out of range for {n_splits} folds.")
-
+            raise ValueError(
+                f"fold_idx {fold_idx} out of range [0, {len(folds)})."
+            )
         fold     = folds[fold_idx]
-        train_ds = MedicalSegmentationDataset(pairs=fold["train"], transform=self._train_tf)
-        val_ds   = MedicalSegmentationDataset(pairs=fold["val"],   transform=self._val_tf)
+        train_ds = MedicalSegmentationDataset(
+            pairs=fold["train"], transform=self._train_tf, **self._ds_kwargs
+        )
+        val_ds = MedicalSegmentationDataset(
+            pairs=fold["val"], transform=self._val_tf, **self._ds_kwargs
+        )
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
 
     def get_test_loader(self):
-        """Return the test DataLoader, or None if no test samples are available."""
-        test_ds = self.handler.get_dataset("test", self._val_tf)
+        """Return the test DataLoader, or ``None`` if no test samples exist."""
+        test_ds = self.handler.get_dataset("test", self._val_tf, **self._ds_kwargs)
         return self._make_loader(test_ds, False) if len(test_ds) > 0 else None

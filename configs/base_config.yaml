@@ -20,6 +20,49 @@ dataset:
   batch_size: 8
   num_workers: 4
 
+  # Dataset-specific normalisation stats.
+  # Run `python -m datasets.stats --config <this_file>` on the training split
+  # to compute these values for a new dataset, then paste the output here.
+  # When absent, ImageNet defaults are used (appropriate for natural images;
+  # suboptimal for ACDC, DSB18 etc).
+  # norm_mean: [0.485, 0.456, 0.406]
+  # norm_std:  [0.229, 0.224, 0.225]
+
+  # Integrity check: scan all pairs at startup and report every broken pair
+  # before training begins.  Disable for very large datasets where the I/O
+  # cost at launch is unacceptable.
+  validate: false
+
+  # In-RAM caching: load all raw images into memory on construction.
+  # Guarded by cache_size_limit_gb — silently disabled if the dataset
+  # would exceed that footprint.  Worthwhile for small datasets (BUSI,
+  # ISIC18) during heavy ablation sweeps.
+  cache: false
+  cache_size_limit_gb: 4.0   # safe for a 16 GB RAM machine
+
+  # Auto-split ratios.  Only needed for flat-directory datasets that do not
+  # ship with pre-made train/val/test splits (e.g. raw ISIC18 / DSB18 dumps).
+  # Ignored when the dataset has a registered handler with its own splits.
+  # split:
+  #   train: 0.8
+  #   val:   0.1
+  #   test:  0.1
+
+  # Augmentation parameters.  Omitting any key keeps its default value.
+  augmentation:
+    horizontal_flip_p:  0.5
+    vertical_flip_p:    0.5
+    random_rotate90_p:  0.5
+    shift_scale_rotate:
+      shift_limit:  0.1
+      scale_limit:  0.1
+      rotate_limit: 30
+      p:            0.5
+    brightness_contrast:
+      brightness_limit: 0.2
+      contrast_limit:   0.2
+      p:                0.5
+
 training:
   epochs: 50
   lr: 0.001
@@ -27,14 +70,14 @@ training:
   weight_decay: 0.0001
   momentum: 0.9            # for SGD
   scheduler: "cosine"      # "cosine", "step", "none"
-  lr_step_size: 10         
-  lr_gamma: 0.5            
+  lr_step_size: 10
+  lr_gamma: 0.5
   warmup_epochs: 5         # learning rate warmup
   loss_type: "combo"       # "bce", "dice", "combo" (BCE + Dice)
   device: "cuda"           # "cuda" or "cpu"
   seed: 42
-  amp: true            # default: false
-  grad_clip_norm: 0.5  # default: null (disabled)
+  amp: true                # default: false
+  grad_clip_norm: 0.5      # default: null (disabled)
 
 k_fold:
   enabled: false           # Set to true to run K-Fold cross validation

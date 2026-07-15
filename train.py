@@ -10,7 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 from models import get_model
-from datasets import SegmentationDataModule
+from datasets import StandardSplitDataModule, KFoldDataModule
 from utils import (
     setup_logger, 
     TensorBoardTracker, 
@@ -374,13 +374,13 @@ def run_training(config, fold=None):
     logger.info(f"Using device: {device}")
     
     # Create datamodule and load data loaders
-    dm = SegmentationDataModule(config)
-    
     if fold is not None:
         logger.info(f"Initializing fold {fold}/{kfold_cfg['n_splits']-1} loaders...")
+        dm = KFoldDataModule(config)
         train_loader, val_loader = dm.get_fold_loaders(fold)
     else:
         logger.info("Initializing standard train/val loaders...")
+        dm = StandardSplitDataModule(config)
         train_loader, val_loader = dm.get_standard_loaders()
         
     logger.info(f"Train samples: {len(train_loader.dataset)}, Val samples: {len(val_loader.dataset)}")
