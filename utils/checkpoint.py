@@ -20,7 +20,7 @@ class CheckpointManager:
         else:
             return current_val < self.best_metric
 
-    def save(self, model, optimizer, scheduler, epoch, metric_val, fold=None, is_best=False):
+    def save(self, model, optimizer, scheduler, epoch, metric_val, fold=None, is_best=False, scaler=None):
         """Save training states including weights, optimizer status, scheduler, and epoch."""
         state = {
             'epoch': epoch,
@@ -31,6 +31,12 @@ class CheckpointManager:
             'monitor_metric': self.monitor_metric,
             'fold': fold
         }
+
+        # persist GradScaler state so a resumed AMP run
+        # continues with the calibrated loss-scale factor rather than
+        # restarting from the default, which risks overflow/underflow.
+        if scaler is not None:
+            state['scaler_state'] = scaler.state_dict()
         
         fold_suffix = f"_fold{fold}" if fold is not None else ""
         
@@ -46,8 +52,8 @@ class CheckpointManager:
         else:
             logger.debug(f"Saved last checkpoint to {last_path}")
 
-    def load(self, checkpoint_path, model, optimizer=None, scheduler=None):
-        """Load checkpoint weights and optionally restore optimizer/scheduler status."""
+    def load(self, checkpoint_path, model, optimizer=None, scheduler=None, scaler=None):
+        """Load checkpoint weights and optionally restore optimizer/scheduler/scaler status."""
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
             
@@ -67,6 +73,12 @@ class CheckpointManager:
             
         if scheduler and checkpoint.get('scheduler_state_dict'):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # restore GradScaler state when available so AMP resumes
+        # with the calibrated loss scale rather than the default initial value.
+        if scaler is not None and checkpoint.get('scaler_state') is not None:
+            scaler.load_state_dict(checkpoint['scaler_state'])
+            logger.info("GradScaler state restored from checkpoint.")
             
         epoch = checkpoint.get('epoch', 0)
         metric_val = checkpoint.get('metric_val', None)

@@ -492,7 +492,10 @@ def run_training(config, fold=None):
             chk_path = os.path.join(checkpoint_dir, f"last{fold_prefix}.pth")
             
         if os.path.exists(chk_path):
-            start_epoch, loaded_metric, _ = chk_manager.load(chk_path, model, optimizer, scheduler)
+            # pass scaler so its state is restored from the checkpoint
+            start_epoch, loaded_metric, _ = chk_manager.load(
+                chk_path, model, optimizer, scheduler, scaler=scaler
+            )
             start_epoch += 1  # start from next epoch
             if loaded_metric is not None:
                 # Restore the "best so far" tracker on chk_manager itself.
@@ -502,20 +505,35 @@ def run_training(config, fold=None):
                 # best-so-far to -inf/inf and could overwrite a genuinely
                 # better earlier checkpoint on the very next epoch.
                 chk_manager.best_metric = loaded_metric
-                # Also restore early-stopping state so patience is not
-                # accidentally reset to zero on resume, which would give the
-                # model a free pass for `patience` extra epochs regardless of
-                # how many epochs of no improvement preceded the interruption.
-                if early_stopper is not None:
+
+            # restore early-stopping counter from its full state_dict
+            # so patience is not accidentally reset to zero on resume.
+            _raw_ckpt = torch.load(chk_path, map_location='cpu')
+            if early_stopper is not None:
+                es_state = _raw_ckpt.get('early_stopper_state')
+                if es_state is not None:
+                    early_stopper.load_state_dict(es_state)
+                    logger.info(
+                        f"EarlyStopping state restored | "
+                        f"best={early_stopper.best_metric:.4f} | "
+                        f"counter={early_stopper.counter}/{early_stopper.patience}"
+                    )
+                else:
+                    # Older checkpoint without early_stopper state: fall back
+                    # to restoring only the best metric (counter stays at 0).
                     early_stopper.restore(best_metric=loaded_metric)
-            # Note: chk_manager.load() does not currently restore GradScaler
-            # state (its signature only takes model/optimizer/scheduler), so
-            # a resumed AMP run starts with a fresh loss-scale factor rather
-            # than the one in effect when training was paused. This is
-            # harmless in practice -- GradScaler re-calibrates its scale
-            # within a handful of iterations -- but if you want bit-for-bit
-            # resume behavior, extend CheckpointManager to also persist
-            # scaler.state_dict().
+
+            # restore RNG states so resumed training is reproducible.
+            if _raw_ckpt.get('rng_state_python') is not None:
+                import random as _random
+                _random.setstate(_raw_ckpt['rng_state_python'])
+            if _raw_ckpt.get('rng_state_numpy') is not None:
+                np.random.set_state(_raw_ckpt['rng_state_numpy'])
+            if _raw_ckpt.get('rng_state_torch') is not None:
+                torch.set_rng_state(_raw_ckpt['rng_state_torch'])
+            if _raw_ckpt.get('rng_state_cuda') is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(_raw_ckpt['rng_state_cuda'])
+                logger.info("RNG states restored from checkpoint.")
         else:
             logger.warning(f"No checkpoint found at {chk_path}. Starting training from scratch.")
             
@@ -559,8 +577,24 @@ def run_training(config, fold=None):
             epoch=epoch,
             metric_val=monitored_val,
             fold=fold,
-            is_best=is_best
+            is_best=is_best,
+            scaler=scaler,
         )
+
+        # also persist early_stopper and RNG states so that a
+        # resumed run can fully reconstruct the training state.
+        # We append to the already-saved 'last' checkpoint in-place.
+        fold_suffix = f"_fold{fold}" if fold is not None else ""
+        last_path = os.path.join(checkpoint_dir, f"last{fold_suffix}.pth")
+        _extra = torch.load(last_path, map_location='cpu')
+        _extra['rng_state_python'] = random.getstate()
+        _extra['rng_state_numpy']  = np.random.get_state()
+        _extra['rng_state_torch']  = torch.get_rng_state()
+        if torch.cuda.is_available():
+            _extra['rng_state_cuda'] = torch.cuda.get_rng_state_all()
+        if early_stopper is not None:
+            _extra['early_stopper_state'] = early_stopper.state_dict()
+        torch.save(_extra, last_path)
 
         # --- Early stopping check ----------------------------------------
         # Evaluated after checkpointing so the best model is always saved

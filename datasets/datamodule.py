@@ -10,6 +10,7 @@ K-Fold    : handler.get_kfold_pairs() → merge train+val → KFold → save to 
 import os
 import json
 import numpy as np
+from loguru import logger
 from torch.utils.data import DataLoader
 from sklearn.model_selection import KFold
 
@@ -17,6 +18,17 @@ from .dataset import MedicalSegmentationDataset
 from .transforms import get_train_transforms, get_val_transforms
 from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
+
+# Stride of the deepest encoder downsampling path.  MK-UNet applies 5
+# sequential stride-2 max-pool stages, so every spatial dimension fed to
+# the model must be an exact multiple of 2**5 = 32.
+_MODEL_STRIDE = 32
+
+
+def _snap_to_stride(value: int, stride: int = _MODEL_STRIDE) -> int:
+    """Round *value* to the nearest positive multiple of *stride*."""
+    snapped = int(round(value / stride)) * stride
+    return max(stride, snapped)
 
 # ── Registry ────────────────────────────────────────────────────────────────
 DATASETS: dict = {
@@ -46,7 +58,35 @@ class SegmentationDataModule:
 
         self.handler = DATASETS[name](ds_cfg)
 
-        h, w = ds_cfg["img_height"], ds_cfg["img_width"]
+        # snap spatial dims to the model's stride at init ---
+        # This must happen unconditionally (not only in the multi-scale branch)
+        # so that standard training with an arbitrary config image size never
+        # reaches the decoder with a dimension that isn't divisible by 32.
+        raw_h = ds_cfg["img_height"]
+        raw_w = ds_cfg["img_width"]
+        h = _snap_to_stride(raw_h)
+        w = _snap_to_stride(raw_w)
+
+        if h % _MODEL_STRIDE != 0 or w % _MODEL_STRIDE != 0:
+            raise ValueError(
+                f"Resolved image size ({h}x{w}) is not divisible by {_MODEL_STRIDE}. "
+                f"Check dataset.img_height ({raw_h}) and dataset.img_width ({raw_w}) "
+                f"in your config."
+            )
+
+        if h != raw_h or w != raw_w:
+            logger.info(
+                f"Image size snapped to nearest multiple of {_MODEL_STRIDE}: "
+                f"({raw_h}x{raw_w}) → ({h}x{w})."
+            )
+        else:
+            logger.info(f"Image size {h}x{w} is already aligned to stride {_MODEL_STRIDE}.")
+
+        # Write snapped values back so the rest of the pipeline (FLOPs
+        # computation, logging, etc.) sees the resolved size.
+        ds_cfg["img_height"] = h
+        ds_cfg["img_width"]  = w
+
         self._train_tf = get_train_transforms(h, w)
         self._val_tf   = get_val_transforms(h, w)
 
