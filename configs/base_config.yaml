@@ -66,18 +66,45 @@ dataset:
 training:
   epochs: 50
   lr: 0.001
-  optimizer: "adamw"       # "adam", "adamw", "sgd"
+  optimizer: "adamw"       # "adam" | "adamw" | "sgd"
   weight_decay: 0.0001
+
+  # Adam / AdamW betas and epsilon (previously hardcoded to PyTorch defaults)
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+
+  # SGD-specific
   momentum: 0.9            # for SGD
-  scheduler: "cosine"      # "cosine", "step", "none"
-  lr_step_size: 10
-  lr_gamma: 0.5
-  warmup_epochs: 5         # learning rate warmup
-  loss_type: "combo"       # "bce", "dice", "combo" (BCE + Dice)
+  nesterov: false          # Nesterov SGD (default: false)
+
+  scheduler: "cosine"      # "cosine" | "step" | "plateau" | "onecycle" | "none"
+  lr_step_size: 10         # StepLR step size
+  lr_gamma: 0.5            # StepLR / ReduceLROnPlateau decay factor
+  warmup_epochs: 5         # learning rate warmup / pct_start for OneCycleLR
+
+  # ReduceLROnPlateau-specific (scheduler: "plateau")
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+
+  loss_type: "combo"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
+  loss_kwargs: {}          # extra kwargs forwarded to the loss constructor
+                           # e.g. for combo: {bce_weight: 0.5, dice_weight: 0.5}
+
   device: "cuda"           # "cuda" or "cpu"
   seed: 42
-  amp: true                # default: false
-  grad_clip_norm: 0.5      # default: null (disabled)
+  amp: true                # Automatic Mixed Precision (CUDA only)
+  grad_clip_mode: "value"  # "value" (default, MK-UNet recipe) | "norm" | "none"
+  grad_clip_value: 0.5     # used when grad_clip_mode: "value"
+  grad_clip_norm: 1.0      # used when grad_clip_mode: "norm"
+
+  # Gradient accumulation: effective batch size = batch_size × accumulate_grad_batches
+  # Useful when heavier models force batch_size down to 1-2.
+  accumulate_grad_batches: 1  # 1 = disabled (step every batch)
+
+  # Exponential Moving Average weights (often a free +0.5–1 pt on Dice)
+  ema:
+    enabled: false
+    decay: 0.9999
 
 k_fold:
   enabled: false           # Set to true to run K-Fold cross validation
@@ -90,6 +117,7 @@ checkpoint:
   checkpoint_path: ""      # Path to load checkpoint for resume or eval
   monitor_metric: "val_dice" # Metric to monitor for best model ("val_dice", "val_miou", "val_loss")
   mode: "max"              # "max" or "min"
+  periodic_save_every: 0   # Save epoch_NNNN.pth every N epochs; 0 = disabled
 
 early_stopping:
   enabled: false           # Set to true to enable early stopping
@@ -102,3 +130,20 @@ logging:
   tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "clinicdb_unet"
   log_interval: 10         # Print/log training progress every N batches
+
+# ---------------------------------------------------------------------------
+# Multi-stage training (optional).
+# When present, Trainer.fit() iterates these stages sequentially instead of
+# using the single training.epochs / training.lr values above.
+# Each stage runs for `epochs` epochs at `lr`, optionally freezing submodules
+# whose names contain any fragment listed in `freeze`.
+# ---------------------------------------------------------------------------
+# stages:
+#   - epochs: 20
+#     lr: 1.0e-3
+#     freeze: []                # nothing frozen; train everything
+#   - epochs: 30
+#     lr: 5.0e-4
+#     freeze: ["encoder"]       # freeze all encoder submodules
+stages: []                    # empty list = use legacy training.epochs / training.lr
+

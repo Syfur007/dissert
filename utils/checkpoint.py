@@ -6,12 +6,15 @@ class CheckpointManager:
     """
     Manages saving and loading of model checkpoints.
     Supports tracking best performance metric and resuming training configurations.
+    Optionally saves periodic epoch snapshots every K epochs when
+    ``periodic_every`` is set to a positive integer.
     """
-    def __init__(self, save_dir, monitor_metric="val_dice", mode="max"):
-        self.save_dir = save_dir
+    def __init__(self, save_dir, monitor_metric="val_dice", mode="max", periodic_every: int = 0):
+        self.save_dir       = save_dir
         self.monitor_metric = monitor_metric
-        self.mode = mode
-        self.best_metric = float('-inf') if mode == "max" else float('inf')
+        self.mode           = mode
+        self.best_metric    = float('-inf') if mode == "max" else float('inf')
+        self.periodic_every = periodic_every  # 0 = disabled
         os.makedirs(save_dir, exist_ok=True)
 
     def is_better(self, current_val):
@@ -51,6 +54,13 @@ class CheckpointManager:
             logger.info(f"Saved new best model checkpoint to {best_path} with {self.monitor_metric}: {metric_val:.4f}")
         else:
             logger.debug(f"Saved last checkpoint to {last_path}")
+
+        # Periodic snapshot: epoch_NNNN[_foldK].pth every periodic_every epochs
+        if self.periodic_every > 0 and epoch % self.periodic_every == 0:
+            periodic_path = os.path.join(self.save_dir, f"epoch_{epoch:04d}{fold_suffix}.pth")
+            torch.save(state, periodic_path)
+            logger.info(f"[PeriodicCheckpoint] Saved snapshot → {periodic_path}")
+
 
     def load(self, checkpoint_path, model, optimizer=None, scheduler=None, scaler=None):
         """Load checkpoint weights and optionally restore optimizer/scheduler/scaler status."""
