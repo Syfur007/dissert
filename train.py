@@ -37,8 +37,8 @@ from utils import (
     CheckpointManager,
     EarlyStopping,
     TensorBoardTracker,
-    get_flops_and_params,
     setup_logger,
+    log_model_summary,
 )
 
 
@@ -99,13 +99,8 @@ def run_training(config: dict, fold=None) -> float:
     model_cfg = config["model"]
     model     = get_model(**model_cfg).to(device)
 
-    try:
-        flops, params = get_flops_and_params(
-            model, (1, model_cfg["in_channels"], dataset_cfg["img_height"], dataset_cfg["img_width"])
-        )
-        logger.info(f"Model Summary | Parameters: {params:,} | FLOPs: {flops:,}")
-    except Exception as exc:
-        logger.warning(f"Could not compute model FLOPs: {exc}")
+    input_shape = (1, model_cfg["in_channels"], dataset_cfg["img_height"], dataset_cfg["img_width"])
+    log_model_summary(model, input_shape, logger, log_dir=log_cfg.get("log_dir"))
 
     # ── Loss ───────────────────────────────────────────────────────────
     loss_kwargs = training_cfg.get("loss_kwargs", {}) or {}

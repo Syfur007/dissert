@@ -11,37 +11,7 @@ def count_parameters(model):
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def get_flops_and_params(model, input_size=(1, 3, 256, 256)):
-    """
-    Calculate FLOPs and parameter counts using 'thop' or 'ptflops' packages.
-    Falls back to parameter counting if profiling packages are not available.
-    """
-    device = next(model.parameters()).device
-    dummy_input = torch.randn(*input_size).to(device)
-    
-    # Try thop
-    try:
-        from thop import profile
-        flops, params = profile(model, inputs=(dummy_input,), verbose=False)
-        return int(flops), int(params)
-    except Exception:
-        pass
-        
-    # Try ptflops
-    try:
-        from ptflops import get_model_complexity_info
-        # Input size shape format expected is (C, H, W)
-        macs, params = get_model_complexity_info(
-            model, input_size[1:], as_strings=False, print_per_layer_stat=False, verbose=False
-        )
-        # FLOPs approximate to 2 * MACs
-        return int(2 * macs), int(params)
-    except Exception:
-        pass
-        
-    # Fallback
-    params = count_parameters(model)
-    return 0, params
+
 
 def get_binary_metrics(pred, gt):
     """
@@ -191,3 +161,61 @@ def measure_throughput(model, dataloader, device, num_warmup=5):
             
     throughput = total_samples / total_time if total_time > 0 else 0.0
     return throughput
+
+def log_model_summary(model, input_shape, logger, log_dir=None):
+    """
+    Profile model complexity (thop → ptflops → param count fallback),
+    log a human-readable MACs/Params line, and optionally write a
+    torchinfo layer table to log_dir/model_summary.txt.
+
+    Returns:
+        (flops, params) as raw integers for downstream use.
+    """
+    import os
+
+    # ── 1. Complexity profiling ──────────────────────────────────────────
+    flops, params = 0, count_parameters(model)
+    device = next(model.parameters()).device
+    dummy = torch.randn(*input_shape).to(device)
+
+    try:
+        from thop import profile
+        flops, params = profile(model, inputs=(dummy,), verbose=False)
+        flops, params = int(flops), int(params)
+    except Exception:
+        try:
+            from ptflops import get_model_complexity_info
+            macs, params = get_model_complexity_info(
+                model, input_shape[1:], as_strings=False,
+                print_per_layer_stat=False, verbose=False
+            )
+            flops, params = int(2 * macs), int(params)
+        except Exception:
+            pass
+
+    def _human(val, suffix=""):
+        for unit in ("", "K", "M", "G", "T"):
+            if abs(val) < 1000:
+                return f"{val:.2f} {unit}{suffix}".strip()
+            val /= 1000
+        return f"{val:.2f} P{suffix}"
+
+    if flops > 0:
+        logger.info(f"Model Complexity | MACs: {_human(flops // 2, 'Mac')} | Params: {_human(params)}")
+    else:
+        logger.info(f"Model Complexity | Params: {params:,}")
+
+    # ── 2. torchinfo layer table ─────────────────────────────────────────
+    if log_dir:
+        try:
+            from torchinfo import summary
+            s = summary(model, input_size=input_shape, verbose=0)
+            summary_path = os.path.join(log_dir, "model_summary.txt")
+            with open(summary_path, "w") as f:
+                f.write(str(s))
+            logger.info(f"Saved model layer summary → {summary_path}")
+        except Exception as e:
+            logger.debug(f"torchinfo summary unavailable: {e}")
+
+    return flops, params
+

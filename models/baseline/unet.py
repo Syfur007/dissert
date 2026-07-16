@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 from ..blocks import DoubleConv, EncoderBlock, DecoderBlock
+from ..registry import MODEL_REGISTRY
 
+@MODEL_REGISTRY.register("unet")
 class UNet(nn.Module):
     """
     Standard modular U-Net implementation.

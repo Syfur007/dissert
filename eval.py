@@ -12,7 +12,7 @@ from datasets import StandardSplitDataModule
 from utils import (
     setup_logger,
     compute_dataset_metrics,
-    get_flops_and_params,
+    log_model_summary,
     measure_throughput,
     EvaluationReporter,
 )
@@ -201,12 +201,9 @@ def main():
         logger.info(f"Loading weights from checkpoint: {chk_path}")
         model = load_checkpoint_into(model, chk_path, device, logger)
 
-    # Get parameters count & FLOPs complexity (reflects full ensemble cost when --ensemble is set)
-    try:
-        flops, params = get_flops_and_params(model, (1, model_cfg['in_channels'], dataset_cfg['img_height'], dataset_cfg['img_width']))
-    except Exception as e:
-        logger.warning(f"Could not compute model FLOPs: {e}")
-        flops, params = 0, sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # Profile complexity — returns (flops, params) and logs + writes model_summary.txt
+    input_shape = (1, model_cfg['in_channels'], dataset_cfg['img_height'], dataset_cfg['img_width'])
+    flops, params = log_model_summary(model, input_shape, logger, log_dir=log_cfg.get('log_dir'))
 
     # Measure evaluation throughput (images/sec); also reflects full ensemble cost when --ensemble is set
     logger.info("Measuring inference throughput...")

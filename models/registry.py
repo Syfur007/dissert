@@ -1,22 +1,28 @@
-from .baseline.unet import UNet
-from .baseline.attention_unet import AttentionUNet
-from .baseline.mk_unet import MK_UNet
-from .baseline.mk_unet import MK_UNet_S
-from .baseline.mk_unet import MK_UNet_T
-from .baseline.emcad import EMCADNet
+class ModelRegistry:
+    def __init__(self):
+        self._registry = {}
 
-from .proposed.gmk_unet import GMK_UNet
+    def register(self, name):
+        def decorator(cls):
+            self._registry[name.lower()] = cls
+            return cls
+        return decorator
 
-MODEL_REGISTRY = {
-    "unet": UNet,
-    "attention_unet": AttentionUNet,
-    "mk_unet": MK_UNet,
-    "mk_unet_s": MK_UNet_S,
-    "mk_unet_t": MK_UNet_T,
-    "emcad": EMCADNet,
+    def get(self, name, **kwargs):
+        name = name.lower()
+        if name not in self._registry:
+            raise ValueError(f"Model '{name}' not found. Available models: {list(self._registry.keys())}")
+        return self._registry[name](**kwargs)
 
-    "gmk_unet": GMK_UNet,
-}
+    def keys(self):
+        return list(self._registry.keys())
+
+    def __contains__(self, name):
+        return name.lower() in self._registry
+
+
+MODEL_REGISTRY = ModelRegistry()
+
 
 def get_model(**kwargs):
     """
@@ -30,7 +36,13 @@ def get_model(**kwargs):
     if name is None:
         raise ValueError("Model 'name' must be provided in the configuration.")
 
-    name = name.lower()
-    if name not in MODEL_REGISTRY:
-        raise ValueError(f"Model '{name}' not found. Available models: {list(MODEL_REGISTRY.keys())}")
-    return MODEL_REGISTRY[name](**kwargs)
+    return MODEL_REGISTRY.get(name, **kwargs)
+
+
+# Import modules to trigger @register decorator execution
+from .baseline.unet import UNet
+from .baseline.attention_unet import AttentionUNet
+from .baseline.mk_unet import MK_UNet, MK_UNet_S, MK_UNet_T
+from .baseline.emcad import EMCADNet
+from .proposed.gmk_unet import GMK_UNet
+

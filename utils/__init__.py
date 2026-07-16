@@ -3,10 +3,10 @@ from .early_stopping import EarlyStopping
 from .checkpoint import CheckpointManager
 from .metrics import (
     count_parameters,
-    get_flops_and_params,
     get_binary_metrics,
     compute_dataset_metrics,
-    measure_throughput
+    measure_throughput,
+    log_model_summary
 )
 from .report import (
     EvaluationReporter,
@@ -23,10 +23,10 @@ __all__ = [
     "CheckpointManager",
     "EarlyStopping",
     "count_parameters",
-    "get_flops_and_params",
     "get_binary_metrics",
     "compute_dataset_metrics",
     "measure_throughput",
+    "log_model_summary",
     "EvaluationReporter",
     "compute_extended_metrics",
     "get_model_memory_size",

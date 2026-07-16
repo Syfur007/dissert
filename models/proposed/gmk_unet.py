@@ -10,99 +10,8 @@ from timm.models.helpers import named_apply
 __all__ = ['GMK_UNet']
 
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-def _gcd(a, b):
-    while b:
-        a, b = b, a % b
-    return a
-
-
-def _init_weights(module, name, scheme=''):
-    if isinstance(module, nn.Conv2d):
-        if scheme == 'normal':
-            nn.init.normal_(module.weight, std=.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif scheme == 'trunc_normal':
-            trunc_normal_tf_(module.weight, std=.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif scheme == 'xavier_normal':
-            nn.init.xavier_normal_(module.weight)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif scheme == 'kaiming_normal':
-            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        else:
-            fan_out = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
-            fan_out //= module.groups
-            nn.init.normal_(module.weight, 0, math.sqrt(2.0 / fan_out))
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-    elif isinstance(module, (nn.BatchNorm2d, nn.LayerNorm)):
-        nn.init.constant_(module.weight, 1)
-        nn.init.constant_(module.bias, 0)
-
-
-def _act(name, inplace=False, neg_slope=0.2, n_prelu=1):
-    name = name.lower()
-    if name == 'relu':       return nn.ReLU(inplace)
-    if name == 'relu6':      return nn.ReLU6(inplace)
-    if name == 'leakyrelu':  return nn.LeakyReLU(neg_slope, inplace)
-    if name == 'prelu':      return nn.PReLU(num_parameters=n_prelu, init=neg_slope)
-    if name == 'gelu':       return nn.GELU()
-    if name == 'hswish':     return nn.Hardswish(inplace)
-    raise NotImplementedError(f'activation [{name}] not found')
-
-
-def _channel_shuffle(x, groups):
-    B, C, H, W = x.shape
-    x = x.view(B, groups, C // groups, H, W)
-    x = x.transpose(1, 2).contiguous()
-    return x.view(B, C, H, W)
-
-
-# ---------------------------------------------------------------------------
-# Shared building blocks (self-contained, no mk_unet dependency)
-# ---------------------------------------------------------------------------
-
-class ChannelAttention(nn.Module):
-    def __init__(self, in_planes, ratio=16, activation='relu'):
-        super().__init__()
-        ratio = min(ratio, in_planes)
-        mid   = in_planes // ratio
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.fc1      = nn.Conv2d(in_planes, mid, 1, bias=False)
-        self.fc2      = nn.Conv2d(mid, in_planes, 1, bias=False)
-        self.act      = _act(activation, inplace=True)
-        self.sigmoid  = nn.Sigmoid()
-        named_apply(partial(_init_weights, scheme='normal'), self)
-
-    def forward(self, x):
-        a = self.fc2(self.act(self.fc1(self.avg_pool(x))))
-        m = self.fc2(self.act(self.fc1(self.max_pool(x))))
-        return self.sigmoid(a + m)
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super().__init__()
-        assert kernel_size in (3, 7, 11)
-        self.conv    = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-        named_apply(partial(_init_weights, scheme='normal'), self)
-
-    def forward(self, x):
-        avg = torch.mean(x, dim=1, keepdim=True)
-        mx, _ = torch.max(x, dim=1, keepdim=True)
-        return self.sigmoid(self.conv(torch.cat([avg, mx], dim=1)))
-
+from ..blocks import _init_weights, act_layer as _act, channel_shuffle as _channel_shuffle, ChannelAttention, SpatialAttention
+from ..registry import MODEL_REGISTRY
 
 class _MultiKernelDWConv(nn.Module):
     def __init__(self, channels, kernel_sizes, stride, activation='relu6', parallel=True):
@@ -151,7 +60,7 @@ class _MKIR(nn.Module):
         self.shortcut = (
             nn.Conv2d(in_c, out_c, 1, bias=False) if (self.use_skip and in_c != out_c) else None
         )
-        self._gcd     = _gcd(combined, out_c)
+        self._gcd     = math.gcd(combined, out_c)
         named_apply(partial(_init_weights, scheme='normal'), self)
 
     def forward(self, x):
@@ -262,6 +171,7 @@ class GroupedAttentionGate(nn.Module):
 # Model
 # ---------------------------------------------------------------------------
 
+@MODEL_REGISTRY.register("gmk_unet")
 class GMK_UNet(nn.Module):
     """
     Guided Multi-color-space K-UNet.

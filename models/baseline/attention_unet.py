@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ..blocks import DoubleConv, EncoderBlock, AttentionBlock
+from ..registry import MODEL_REGISTRY
 
 class AttentionDecoderBlock(nn.Module):
     """
@@ -42,6 +43,7 @@ class AttentionDecoderBlock(nn.Module):
         return self.conv(x)
 
 
+@MODEL_REGISTRY.register("attention_unet")
 class AttentionUNet(nn.Module):
     """
     Attention U-Net architecture.

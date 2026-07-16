@@ -17,6 +17,7 @@ torchprofile
 torchmetrics
 einops
 ptflops
+torchinfo
 torchsummary
 torchsummaryx
 segmentation-mask-overlay==0.3.4
