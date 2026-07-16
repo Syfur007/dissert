@@ -30,7 +30,12 @@ import yaml
 from datasets import KFoldDataModule, StandardSplitDataModule
 from models import get_model
 from training import EMA, Trainer
-from training.callbacks import PeriodicCheckpointCallback, TensorBoardCallback
+from training.callbacks import (
+    PeriodicCheckpointCallback,
+    PredictionOverlayCallback,
+    TensorBoardCallback,
+    TrainingCurvePlotCallback,
+)
 from training.losses import get_loss
 from training.optimizers import build_optimizer, build_scheduler
 from utils import (
@@ -77,11 +82,16 @@ def run_training(config: dict, fold=None) -> float:
     set_seed(training_cfg["seed"])
 
     # ── Logging ────────────────────────────────────────────────────────
+    base_exp        = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb_b16_lr001
     fold_prefix     = f"_fold{fold}" if fold is not None else ""
-    experiment_name = f"{log_cfg['experiment_name']}{fold_prefix}"
+    experiment_name = f"{base_exp}{fold_prefix}"          # used for TB / checkpoints
 
-    logger = setup_logger(log_cfg["log_dir"], experiment_name)
+    # Log filename is e.g. "fold0", "fold1", or base name for non-CV runs.
+    # The directory is always logs/{base_exp}/ so all folds share one folder.
+    log_filename = f"fold{fold}" if fold is not None else base_exp
+    logger, exp_log_dir = setup_logger(log_cfg["log_dir"], base_exp, log_filename=log_filename)
     logger.info(f"Using device: {device}")
+    logger.info(f"Experiment log dir: {exp_log_dir}")
 
     # ── Data ───────────────────────────────────────────────────────────
     if fold is not None:
@@ -100,7 +110,8 @@ def run_training(config: dict, fold=None) -> float:
     model     = get_model(**model_cfg).to(device)
 
     input_shape = (1, model_cfg["in_channels"], dataset_cfg["img_height"], dataset_cfg["img_width"])
-    log_model_summary(model, input_shape, logger, log_dir=log_cfg.get("log_dir"))
+    # model_summary.txt lands inside the experiment subdir
+    log_model_summary(model, input_shape, logger, log_dir=exp_log_dir)
 
     # ── Loss ───────────────────────────────────────────────────────────
     loss_kwargs = training_cfg.get("loss_kwargs", {}) or {}
@@ -166,11 +177,15 @@ def run_training(config: dict, fold=None) -> float:
         ema = EMA(model, decay=ema_cfg.get("decay", 0.9999))
         logger.info(f"EMA enabled | decay={ema.decay}")
 
+    # ── TensorBoard tracker ────────────────────────────────────────────
+    tracker = TensorBoardTracker(log_cfg["tb_dir"], experiment_name)
+
     # ── Callbacks ──────────────────────────────────────────────────────
-    tracker   = TensorBoardTracker(log_cfg["tb_dir"], experiment_name)
     callbacks = [
         TensorBoardCallback(tracker),
     ]
+
+    # Periodic epoch snapshots
     periodic_k = chk_cfg.get("periodic_save_every", 0)
     if periodic_k > 0:
         callbacks.append(
@@ -180,6 +195,34 @@ def run_training(config: dict, fold=None) -> float:
                 fold       = fold,
             )
         )
+
+    # Prediction overlay visualisation
+    overlay_save_every = log_cfg.get("overlay_save_every", 10)
+    overlay_n_samples  = log_cfg.get("overlay_n_samples", 4)
+    if log_cfg.get("save_overlays", True) and overlay_save_every > 0:
+        overlay_dir = os.path.join(exp_log_dir, "overlays")
+        callbacks.append(
+            PredictionOverlayCallback(
+                val_loader  = val_loader,
+                device      = device,
+                save_dir    = overlay_dir,
+                n_samples   = overlay_n_samples,
+                save_every  = overlay_save_every,
+                tb_tracker  = tracker,
+            )
+        )
+        logger.info(
+            f"PredictionOverlay | every {overlay_save_every} epochs | "
+            f"{overlay_n_samples} samples | dir={overlay_dir}"
+        )
+
+    # Offline training-curve plots (runs at the very end of training)
+    callbacks.append(
+        TrainingCurvePlotCallback(
+            tb_log_dir = tracker.log_dir,   # the TensorBoard event directory
+            out_dir    = exp_log_dir,
+        )
+    )
 
     # ── Resume ─────────────────────────────────────────────────────────
     start_epoch   = 1

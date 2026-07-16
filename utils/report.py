@@ -288,6 +288,7 @@ class EvaluationReporter:
         # Filled by set_eval_results()
         self._metrics_base     = {}
         self._metrics_ext      = {}
+        self._per_class        = {}   # per_class sub-dict from compute_dataset_metrics
         self._num_samples      = 0
         self._eval_duration_s  = 0.0
         self._is_multiclass    = False
@@ -370,6 +371,7 @@ class EvaluationReporter:
                              into one, so they're skipped instead.
         """
         self._metrics_base    = base_metrics
+        self._per_class       = base_metrics.get("per_class", {})
         self._num_samples     = num_samples
         self._eval_duration_s = eval_duration_s
         self._is_multiclass   = is_multiclass
@@ -413,8 +415,40 @@ class EvaluationReporter:
             return f"{len(cp)} fold checkpoints (dir: {os.path.dirname(cp[0])})"
         return cp or "N/A"
 
+    def _per_class_table(self) -> list:
+        """Build a per-class metric table (rows) for multiclass reports.
+
+        Returns an empty list if no per-class data is available.
+        """
+        pc = self._per_class
+        if not pc:
+            return []
+
+        dice_vals = pc.get("dice", [])
+        iou_vals  = pc.get("iou",  [])
+        hd95_vals = pc.get("hd95", [])
+        asd_vals  = pc.get("asd",  [])
+        n_cls     = max(len(dice_vals), len(iou_vals))
+        if n_cls == 0:
+            return []
+
+        cfg_names = self.config.get("dataset", {}).get("class_names", [])
+
+        rows = [["━━ PER-CLASS BREAKDOWN ━━", "", "", "", ""]]
+        rows.append(["Class", "Dice", "IoU", "HD95", "ASD"])
+        for c in range(n_cls):
+            name = cfg_names[c] if cfg_names and c < len(cfg_names) else f"Class {c}"
+            rows.append([
+                name,
+                _safe_fmt(dice_vals[c] if c < len(dice_vals) else None),
+                _safe_fmt(iou_vals[c]  if c < len(iou_vals)  else None),
+                _safe_fmt(hd95_vals[c] if c < len(hd95_vals) else None, ".2f"),
+                _safe_fmt(asd_vals[c]  if c < len(asd_vals)  else None, ".2f"),
+            ])
+        return rows
+
     def _metrics_table(self) -> list:
-        """Build a flat list-of-rows for tabulate."""
+        """Build a flat list-of-rows for tabulate (2-column format)."""
         m   = self._metrics_base
         ext = self._metrics_ext
         ext_note = " (N/A — multiclass)" if self._is_multiclass else ""
@@ -489,6 +523,10 @@ class EvaluationReporter:
 
         return rows
 
+    def _metrics_table_2col(self) -> list:
+        """Alias kept for backward compat; returns same as _metrics_table."""
+        return self._metrics_table()
+
     # ------------------------------------------------------------------
     # Public output methods
     # ------------------------------------------------------------------
@@ -515,6 +553,20 @@ class EvaluationReporter:
             print("-" * 68)
             for row in rows:
                 print(f"{row[0]:<40} {row[1]}")
+
+        # Per-class breakdown (multiclass only)
+        pc_rows = self._per_class_table()
+        if pc_rows:
+            print("\n" + border)
+            print("  PER-CLASS METRIC BREAKDOWN".center(68))
+            print(border)
+            if _TABULATE:
+                print(tabulate(pc_rows[2:], headers=pc_rows[1], tablefmt="github"))
+            else:
+                print(f"{'Class':<25} {'Dice':>8} {'IoU':>8} {'HD95':>8} {'ASD':>8}")
+                print("-" * 60)
+                for row in pc_rows[2:]:
+                    print(f"{row[0]:<25} {row[1]:>8} {row[2]:>8} {row[3]:>8} {row[4]:>8}")
 
         print(border + "\n")
 
@@ -562,10 +614,27 @@ class EvaluationReporter:
                     fh.write(f"| {row[0]:<42} | {row[1]:<30} |\n")
             fh.write("\n\n---\n\n")
 
+            # Per-class breakdown
+            pc_rows = self._per_class_table()
+            if pc_rows:
+                fh.write("## Per-Class Metrics\n\n")
+                pc_header = pc_rows[1]  # ["Class", "Dice", "IoU", "HD95", "ASD"]
+                pc_data   = pc_rows[2:]
+                if _TABULATE:
+                    fh.write(tabulate(pc_data, headers=pc_header, tablefmt="github"))
+                else:
+                    fh.write(f"| {'Class':<25} | {'Dice':>8} | {'IoU':>8} | {'HD95':>8} | {'ASD':>8} |\n")
+                    fh.write(f"|{'-'*27}|{'-'*10}|{'-'*10}|{'-'*10}|{'-'*10}|\n")
+                    for row in pc_data:
+                        fh.write(f"| {row[0]:<25} | {row[1]:>8} | {row[2]:>8} | {row[3]:>8} | {row[4]:>8} |\n")
+                fh.write("\n\n---\n\n")
+
             # Full config
             fh.write(self._config_section_md())
 
     def _write_json(self, path: str):
+        # Strip per_class from the flat metrics dict (it lives under its own key)
+        base_flat = {k: v for k, v in self._metrics_base.items() if k != "per_class"}
         data = {
             "config":      self.config,
             "experiment":  self.config.get("logging", {}).get("experiment_name", ""),
@@ -576,9 +645,10 @@ class EvaluationReporter:
             "num_samples": self._num_samples,
             "eval_duration_s": self._eval_duration_s,
             "metrics": {
-                **self._metrics_base,
+                **base_flat,
                 **self._metrics_ext,
             },
+            "per_class_metrics": self._per_class,
             "model": {
                 "name":              self._model_name,
                 "params":            self._params,

@@ -194,7 +194,7 @@ class Trainer:
         for epoch in range(start_epoch, end_epoch + 1):
             self._call("on_epoch_start", epoch)
 
-            train_loss  = self.train_one_epoch(epoch)
+            train_loss, train_dice, train_iou = self.train_one_epoch(epoch)
             val_metrics = self._run_validate()
 
             # LR scheduler step
@@ -204,11 +204,14 @@ class Trainer:
             current_lr = self.optimizer.param_groups[0]["lr"]
             val_metrics["lr"]         = current_lr
             val_metrics["train_loss"] = train_loss
+            val_metrics["train_dice"] = train_dice
+            val_metrics["train_iou"]  = train_iou
 
-            # Log to stdout
+            # Log summary line
             self.logger.info(
                 f"Epoch {epoch:03d} | "
-                f"Train Loss: {train_loss:.4f} | "
+                f"Loss: {train_loss:.4f} | "
+                f"Train Dice: {train_dice:.4f} | Train IoU: {train_iou:.4f} | "
                 f"Val Loss: {val_metrics['loss']:.4f} | "
                 f"Val Dice: {val_metrics['dice']:.4f} | "
                 f"Val mIoU: {val_metrics['miou']:.4f} | "
@@ -216,6 +219,15 @@ class Trainer:
                 f"Val ASD: {val_metrics['asd']:.2f} | "
                 f"LR: {current_lr:.6f}"
             )
+
+            # Per-class breakdown (multiclass only) at DEBUG verbosity
+            pc = val_metrics.get("per_class", {})
+            if pc:
+                class_dice = pc.get("dice", [])
+                class_iou  = pc.get("iou",  [])
+                lines = [f"  Class {c}: Dice={class_dice[c]:.4f} IoU={class_iou[c]:.4f}"
+                         for c in range(len(class_dice))]
+                self.logger.debug("Per-class Val metrics:\n" + "\n".join(lines))
 
             # Callbacks (includes TensorBoard logging)
             self._call("on_epoch_end", epoch, val_metrics)
@@ -294,7 +306,7 @@ class Trainer:
     # Core epoch methods
     # ------------------------------------------------------------------
 
-    def train_one_epoch(self, epoch: int) -> float:
+    def train_one_epoch(self, epoch: int):
         """One full training pass over the training DataLoader.
 
         Supports:
@@ -303,13 +315,16 @@ class Trainer:
         - Gradient accumulation (``training.accumulate_grad_batches``)
         - EMA update after each optimizer step
         - Batch-level callbacks (``on_batch_end``)
+        - Rolling Dice/IoU computed from raw logits (no medpy required)
 
         Returns:
-            Mean training loss over the epoch (tracked at scale==1.0).
+            Tuple of (mean_train_loss, mean_train_dice, mean_train_iou).
         """
         self.model.train()
         running_loss    = 0.0
         running_samples = 0
+        running_dice    = 0.0
+        running_iou     = 0.0
 
         ms_enabled      = self._ms_cfg.get("enabled", False) if self._ms_cfg else False
         ms_scales       = self._ms_cfg.get("scales", [0.75, 1.0, 1.25]) if self._ms_cfg else [1.0]
@@ -366,9 +381,29 @@ class Trainer:
                     loss.backward()
 
                 last_loss_value = loss.item() * self._accum_steps  # unscaled for display
+
+                # Rolling Dice/IoU — computed only on the tracking scale, no extra memory
                 if scale == track_scale:
                     running_loss    += last_loss_value * imgs_s.size(0)
                     running_samples += imgs_s.size(0)
+                    with torch.no_grad():
+                        if outputs.shape[1] == 1:
+                            p = (torch.sigmoid(outputs) > 0.5).float()
+                            t = (masks_s > 0.5).float()
+                        else:
+                            n_cls = outputs.shape[1]
+                            p = nn.functional.one_hot(
+                                torch.argmax(outputs, dim=1), n_cls
+                            ).permute(0, 3, 1, 2).float()
+                            t = nn.functional.one_hot(
+                                masks_s.long().squeeze(1), n_cls
+                            ).permute(0, 3, 1, 2).float()
+                        inter      = (p * t).sum(dim=(1, 2, 3))
+                        union_sum  = p.sum(dim=(1, 2, 3)) + t.sum(dim=(1, 2, 3))
+                        batch_dice = (2.0 * inter / union_sum.clamp(min=1e-6)).mean().item()
+                        batch_iou  = (inter / (union_sum - inter).clamp(min=1e-6)).mean().item()
+                    running_dice += batch_dice * imgs_s.size(0)
+                    running_iou  += batch_iou  * imgs_s.size(0)
 
             # Gradient accumulation: only step every N batches
             accum_counter += 1
@@ -392,10 +427,19 @@ class Trainer:
                 if self.scheduler is not None and self.scheduler_step_mode == "batch":
                     self.scheduler.step()
 
-            pbar.set_postfix(loss=f"{last_loss_value:.4f}")
+            mean_dice = running_dice / max(running_samples, 1)
+            mean_iou  = running_iou  / max(running_samples, 1)
+            pbar.set_postfix(
+                loss=f"{last_loss_value:.4f}",
+                dice=f"{mean_dice:.4f}",
+                iou=f"{mean_iou:.4f}",
+            )
             self._call("on_batch_end", batch_idx, last_loss_value)
 
-        return running_loss / max(running_samples, 1)
+        mean_loss = running_loss / max(running_samples, 1)
+        mean_dice = running_dice / max(running_samples, 1)
+        mean_iou  = running_iou  / max(running_samples, 1)
+        return mean_loss, mean_dice, mean_iou
 
     def validate(self) -> Dict[str, Any]:
         """Public validate (uses live model weights — no EMA swap)."""

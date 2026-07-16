@@ -15,6 +15,9 @@ from utils import (
     log_model_summary,
     measure_throughput,
     EvaluationReporter,
+    save_confusion_matrix,
+    save_roc_curve,
+    save_pr_curve,
 )
 
 
@@ -76,12 +79,16 @@ def evaluate(model, dataloader, device, is_multiclass=False):
     Evaluate a model (single model or EnsembleModel) on a dataset.
 
     Returns:
-        metrics (dict): Averaged Dice/mIoU/HD95/ASD across the test set.
-        preds_list (list): Raw per-image numpy predictions (for extended metrics).
-        gts_list (list): Raw per-image numpy ground-truth masks.
+        metrics   (dict):  Averaged Dice/mIoU/HD95/ASD + per_class breakdown.
+        preds_list (list): Hard per-image numpy predictions (binary or argmax).
+        gts_list   (list): Raw per-image numpy ground-truth masks.
+        probs_list (list): Soft probability arrays (sigmoid or softmax).
+                           Shape (1, H, W) for binary, (C, H, W) for multiclass.
+                           Used for ROC / PR curve computation.
     """
     preds_list = []
-    gts_list = []
+    gts_list   = []
+    probs_list = []
 
     model.eval()
 
@@ -90,35 +97,35 @@ def evaluate(model, dataloader, device, is_multiclass=False):
             images = images.to(device)
             outputs = model(images)
 
-            # Prepare predictions and ground truths for metrics
             if not is_multiclass:
                 # Binary: threshold sigmoid probabilities into a hard mask
-                probs = torch.sigmoid(outputs)
+                probs = torch.sigmoid(outputs)           # (B, 1, H, W)
                 preds = (probs > 0.5).cpu().numpy().astype(np.uint8)
+                probs_np = probs.cpu().numpy()           # keep (B, 1, H, W) for ROC/PR
             else:
-                # Multiclass: take the most likely class per pixel so shapes
-                # match the (H, W) integer ground-truth masks. Without this
-                # argmax, preds would stay as (C, H, W) softmax probabilities,
-                # which is shape/type-incompatible with gts_list and breaks
-                # Dice/IoU/HD95/ASD computation.
-                probs = torch.softmax(outputs, dim=1)
+                # Multiclass: argmax over class dimension
+                probs = torch.softmax(outputs, dim=1)    # (B, C, H, W)
                 preds = torch.argmax(probs, dim=1).cpu().numpy().astype(np.uint8)
+                probs_np = probs.cpu().numpy()           # (B, C, H, W)
 
             preds_list.extend([p for p in preds])
             gts_list.extend([m.cpu().numpy().astype(np.uint8) for m in masks])
+            probs_list.extend([p for p in probs_np])
 
-    # Calculate Dice, IoU, HD95, ASD
+    # Calculate Dice, IoU, HD95, ASD (+ per_class breakdown for multiclass)
     metrics = compute_dataset_metrics(preds_list, gts_list)
-    return metrics, preds_list, gts_list
+    return metrics, preds_list, gts_list, probs_list
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate PyTorch Segmentation Model")
-    parser.add_argument("--config", type=str, default="configs/base_config.yaml", help="Path to config file")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Explicit path to model checkpoint")
-    parser.add_argument("--fold", type=int, default=None, help="Specific fold checkpoint to evaluate")
-    parser.add_argument("--ensemble", action="store_true", help="Ensemble evaluation of all K-folds")
-    parser.add_argument("--dataset_dir", type=str, default=None, help="Override dataset directory")
+    parser.add_argument("--config",      type=str, default="configs/base_config.yaml")
+    parser.add_argument("--checkpoint",  type=str, default=None)
+    parser.add_argument("--fold",        type=int, default=None)
+    parser.add_argument("--ensemble",    action="store_true")
+    parser.add_argument("--dataset_dir", type=str, default=None)
+    parser.add_argument("--no-vis",      action="store_true",
+                        help="Skip confusion matrix / ROC / PR curve generation.")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -128,14 +135,18 @@ def main():
         config['dataset']['root'] = args.dataset_dir
 
     training_cfg = config['training']
-    dataset_cfg = config['dataset']
-    kfold_cfg = config.get('k_fold', {})
-    chk_cfg = config.get('checkpoint', {})
-    log_cfg = config.get('logging', {})
+    dataset_cfg  = config['dataset']
+    kfold_cfg    = config.get('k_fold', {})
+    chk_cfg      = config.get('checkpoint', {})
+    log_cfg      = config.get('logging', {})
 
     device = torch.device(training_cfg['device'] if torch.cuda.is_available() else "cpu")
-    logger = setup_logger(log_cfg['log_dir'], f"{log_cfg['experiment_name']}_eval")
+
+    # ── Per-experiment log subdir (mirrors train.py layout) ────────────
+    eval_name = f"{log_cfg['experiment_name']}_eval"
+    logger, exp_log_dir = setup_logger(log_cfg['log_dir'], eval_name)
     logger.info(f"Using device: {device}")
+    logger.info(f"Eval log dir: {exp_log_dir}")
 
     # Init Datamodule
     dm = StandardSplitDataModule(config)
@@ -148,8 +159,9 @@ def main():
     logger.info(f"Test samples found: {len(test_loader.dataset)}")
 
     # Init Model structure
-    model_cfg = config['model']
+    model_cfg     = config['model']
     is_multiclass = model_cfg['out_channels'] > 1
+    class_names   = dataset_cfg.get('class_names', None)
 
     # Determine which checkpoints to load
     checkpoint_dir = os.path.join(chk_cfg.get('save_dir', 'checkpoints'), log_cfg['experiment_name'])
@@ -176,20 +188,15 @@ def main():
             logger.error("No fold checkpoints could be loaded for ensembling.")
             return
 
-        # Wrap all fold models in a single module so FLOPs/params/throughput
-        # and evaluate() all measure the actual ensemble cost, not just one fold.
         model = EnsembleModel(fold_models).to(device)
     else:
-        # Load a single model
         model = get_model(**model_cfg).to(device)
 
-        # Determine path
         if args.checkpoint:
             chk_path = args.checkpoint
         elif args.fold is not None:
             chk_path = os.path.join(checkpoint_dir, f"best_fold{args.fold}.pth")
         else:
-            # Fallback to standard non-k-fold best or fold0 best
             chk_path = os.path.join(checkpoint_dir, "best.pth")
             if not os.path.exists(chk_path):
                 chk_path = os.path.join(checkpoint_dir, "best_fold0.pth")
@@ -200,52 +207,111 @@ def main():
 
         logger.info(f"Loading weights from checkpoint: {chk_path}")
         model = load_checkpoint_into(model, chk_path, device, logger)
+        loaded_checkpoint_paths = chk_path
 
-    # Profile complexity — returns (flops, params) and logs + writes model_summary.txt
+    # Profile complexity — also writes model_summary.txt into exp_log_dir
     input_shape = (1, model_cfg['in_channels'], dataset_cfg['img_height'], dataset_cfg['img_width'])
-    flops, params = log_model_summary(model, input_shape, logger, log_dir=log_cfg.get('log_dir'))
+    flops, params = log_model_summary(model, input_shape, logger, log_dir=exp_log_dir)
 
-    # Measure evaluation throughput (images/sec); also reflects full ensemble cost when --ensemble is set
+    # Measure evaluation throughput
     logger.info("Measuring inference throughput...")
     throughput = measure_throughput(model, test_loader, device)
 
-    # Build the reporter early so latency measurement happens before the eval loop.
-    # checkpoint_path is a list of fold files in ensemble mode -- passing the
-    # directory here previously made get_model_disk_size() report the
-    # directory inode size instead of the combined checkpoint size.
+    # Build reporter early (latency measured before the eval loop)
     reporter = EvaluationReporter(config, args, logger)
     reporter.set_model_info(
-        model=model,
-        flops=flops,
-        params=params,
-        throughput=throughput,
-        checkpoint_path=loaded_checkpoint_paths if args.ensemble else chk_path,
-        measure_latency=True,
+        model            = model,
+        flops            = flops,
+        params           = params,
+        throughput       = throughput,
+        checkpoint_path  = loaded_checkpoint_paths if args.ensemble else chk_path,
+        measure_latency  = True,
     )
 
-    # Run evaluation
+    # ── Evaluation loop ────────────────────────────────────────────────
     logger.info("Starting test set evaluation...")
     start_eval_time = time.time()
 
-    metrics, preds_list, gts_list = evaluate(model, test_loader, device, is_multiclass=is_multiclass)
+    metrics, preds_list, gts_list, probs_list = evaluate(
+        model, test_loader, device, is_multiclass=is_multiclass
+    )
 
     eval_duration = time.time() - start_eval_time
     logger.info(f"Evaluation finished in {eval_duration:.2f} seconds.")
 
-    # Populate remaining results and render reports
+    # Log macro metrics
+    logger.info(
+        f"Dice: {metrics['dice']:.4f} | mIoU: {metrics['miou']:.4f} | "
+        f"HD95: {metrics['hd95']:.2f} | ASD: {metrics['asd']:.2f}"
+    )
+
+    # Log per-class breakdown if available
+    pc = metrics.get("per_class", {})
+    if pc:
+        class_dice = pc.get("dice", [])
+        class_iou  = pc.get("iou",  [])
+        lines = []
+        for c in range(len(class_dice)):
+            name = class_names[c] if class_names and c < len(class_names) else f"Class {c}"
+            lines.append(f"  {name}: Dice={class_dice[c]:.4f}  IoU={class_iou[c]:.4f}")
+        logger.info("Per-class metrics:\n" + "\n".join(lines))
+
+    # ── Visualisations (confusion matrix, ROC, PR) ─────────────────────
+    if not args.no_vis:
+        vis_dir = os.path.join(exp_log_dir, "curves")
+        os.makedirs(vis_dir, exist_ok=True)
+
+        # Confusion matrix (from hard predictions)
+        try:
+            cm_path = os.path.join(vis_dir, "confusion_matrix.png")
+            save_confusion_matrix(
+                preds_list, gts_list, cm_path,
+                class_names=class_names,
+                normalize=True,
+                title=f"Confusion Matrix — {log_cfg['experiment_name']}",
+            )
+            logger.info(f"Saved confusion matrix → {cm_path}")
+        except Exception as exc:
+            logger.warning(f"Could not save confusion matrix: {exc}")
+
+        # ROC curves (from soft probabilities)
+        try:
+            roc_path = os.path.join(vis_dir, "roc_curve.png")
+            save_roc_curve(
+                probs_list, gts_list, roc_path,
+                class_names=class_names,
+                title=f"ROC Curve — {log_cfg['experiment_name']}",
+            )
+            logger.info(f"Saved ROC curve → {roc_path}")
+        except Exception as exc:
+            logger.warning(f"Could not save ROC curve: {exc}")
+
+        # PR curves (from soft probabilities)
+        try:
+            pr_path = os.path.join(vis_dir, "pr_curve.png")
+            save_pr_curve(
+                probs_list, gts_list, pr_path,
+                class_names=class_names,
+                title=f"Precision-Recall Curve — {log_cfg['experiment_name']}",
+            )
+            logger.info(f"Saved PR curve → {pr_path}")
+        except Exception as exc:
+            logger.warning(f"Could not save PR curve: {exc}")
+
+    # ── Report ─────────────────────────────────────────────────────────
     reporter.set_eval_results(
-        base_metrics=metrics,
-        preds=preds_list,
-        gts=gts_list,
-        num_samples=len(test_loader.dataset),
-        eval_duration_s=eval_duration,
-        is_multiclass=is_multiclass,
+        base_metrics    = metrics,
+        preds           = preds_list,
+        gts             = gts_list,
+        num_samples     = len(test_loader.dataset),
+        eval_duration_s = eval_duration,
+        is_multiclass   = is_multiclass,
     )
 
     reporter.print_console()
     reporter.save(
-        report_dir=log_cfg['log_dir'],
-        filename_prefix=log_cfg['experiment_name'],
+        report_dir      = exp_log_dir,
+        filename_prefix = log_cfg['experiment_name'],
     )
 
 

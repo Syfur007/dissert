@@ -15,6 +15,12 @@ dataset:
   # val_list:   "data/polyp/ClinicDB/val_list_clinicdb.txt"
   # test_list:  "data/polyp/ClinicDB/test_list_clinicdb.txt"
 
+  # Optional: class names for multiclass datasets (e.g. Synapse).
+  # Used in per-class metric tables, confusion-matrix labels, and overlay colours.
+  # Leave absent or null for binary segmentation.
+  # class_names: ["background", "aorta", "gallbladder", "spleen", "left kidney",
+  #               "right kidney", "liver", "stomach", "pancreas"]
+
   img_height: 256
   img_width: 256
   batch_size: 8
@@ -130,6 +136,13 @@ logging:
   tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "clinicdb_unet"
   log_interval: 10         # Print/log training progress every N batches
+
+  # Prediction overlay visualisation.
+  # A side-by-side [Input | Ground Truth | Prediction] grid is saved every
+  # `overlay_save_every` epochs.  Set to 0 or `save_overlays: false` to disable.
+  save_overlays: true
+  overlay_save_every: 10   # epoch interval (default: every 10 epochs)
+  overlay_n_samples: 4     # number of images per grid
 
 # ---------------------------------------------------------------------------
 # Multi-stage training (optional).

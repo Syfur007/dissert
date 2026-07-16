@@ -67,55 +67,93 @@ def get_binary_metrics(pred, gt):
 def compute_dataset_metrics(preds, gts):
     """
     Calculate average metrics over a complete validation/test dataset.
-    
+
     Args:
         preds (list of np.ndarray): Channel-wise or binary predictions.
-        gts (list of np.ndarray): Ground truth labels.
-        
+            For multiclass, each element must have shape (C, H, W) with one
+            channel per class.  For binary, shape is (H, W) or (1, H, W).
+        gts (list of np.ndarray): Ground truth labels matching preds.
+
     Returns:
-        dict: Averaged Dice, mIoU, HD95, and ASD.
+        dict: Keys ``dice``, ``miou``, ``hd95``, ``asd`` — macro-averaged
+              across all samples.  Also includes ``per_class`` sub-dict with
+              per-class mean vectors (multiclass only):
+              ``{'dice': [...], 'iou': [...], 'hd95': [...], 'asd': [...]}``.
+              Binary inputs return ``per_class: {}``.
     """
     dice_list = []
-    iou_list = []
+    iou_list  = []
     hd95_list = []
-    asd_list = []
-    
+    asd_list  = []
+
+    # Per-class accumulators: class_index → list of per-sample values
+    per_class_dice: dict = {}
+    per_class_iou:  dict = {}
+    per_class_hd95: dict = {}
+    per_class_asd:  dict = {}
+    is_multiclass = False
+
     for p, g in zip(preds, gts):
         if p.ndim == 3:
-            # Handle class channels
             if p.shape[0] == 1:
+                # ── binary (1, H, W) ─────────────────────────────────────
                 p_sq = p.squeeze(0)
                 g_sq = g.squeeze(0)
                 m = get_binary_metrics(p_sq, g_sq)
                 dice_list.append(m['dice'])
                 iou_list.append(m['iou'])
                 if m['hd95'] < 999.0: hd95_list.append(m['hd95'])
-                if m['asd'] < 999.0: asd_list.append(m['asd'])
+                if m['asd']  < 999.0: asd_list.append(m['asd'])
             else:
-                # Multi-class average
+                # ── multiclass (C, H, W) ──────────────────────────────────
+                is_multiclass = True
                 class_dices, class_ious, class_hd95, class_asds = [], [], [], []
                 for c in range(p.shape[0]):
                     m = get_binary_metrics(p[c], g[c])
                     class_dices.append(m['dice'])
                     class_ious.append(m['iou'])
-                    if m['hd95'] < 999.0: class_hd95.append(m['hd95'])
-                    if m['asd'] < 999.0: class_asds.append(m['asd'])
+                    valid_hd95 = m['hd95'] if m['hd95'] < 999.0 else None
+                    valid_asd  = m['asd']  if m['asd']  < 999.0 else None
+                    if valid_hd95 is not None: class_hd95.append(valid_hd95)
+                    if valid_asd  is not None: class_asds.append(valid_asd)
+
+                    # Accumulate per-class
+                    per_class_dice.setdefault(c, []).append(m['dice'])
+                    per_class_iou.setdefault(c, []).append(m['iou'])
+                    if valid_hd95 is not None:
+                        per_class_hd95.setdefault(c, []).append(valid_hd95)
+                    if valid_asd is not None:
+                        per_class_asd.setdefault(c, []).append(valid_asd)
+
                 dice_list.append(np.mean(class_dices))
                 iou_list.append(np.mean(class_ious))
                 if class_hd95: hd95_list.append(np.mean(class_hd95))
                 if class_asds: asd_list.append(np.mean(class_asds))
         else:
+            # ── flat binary (H, W) ────────────────────────────────────────
             m = get_binary_metrics(p, g)
             dice_list.append(m['dice'])
             iou_list.append(m['iou'])
             if m['hd95'] < 999.0: hd95_list.append(m['hd95'])
-            if m['asd'] < 999.0: asd_list.append(m['asd'])
-            
+            if m['asd']  < 999.0: asd_list.append(m['asd'])
+
+    # Build per-class summary (only non-empty for multiclass runs)
+    per_class: dict = {}
+    if is_multiclass:
+        n_cls = max(per_class_dice.keys()) + 1 if per_class_dice else 0
+        per_class = {
+            'dice': [float(np.mean(per_class_dice.get(c, [0.0]))) for c in range(n_cls)],
+            'iou':  [float(np.mean(per_class_iou.get(c,  [0.0]))) for c in range(n_cls)],
+            'hd95': [float(np.mean(per_class_hd95.get(c, [0.0]))) for c in range(n_cls)],
+            'asd':  [float(np.mean(per_class_asd.get(c,  [0.0]))) for c in range(n_cls)],
+        }
+
     return {
-        'dice': float(np.mean(dice_list)) if dice_list else 0.0,
-        'miou': float(np.mean(iou_list)) if iou_list else 0.0,
-        'hd95': float(np.mean(hd95_list)) if hd95_list else 0.0,
-        'asd': float(np.mean(asd_list)) if asd_list else 0.0
+        'dice':      float(np.mean(dice_list)) if dice_list else 0.0,
+        'miou':      float(np.mean(iou_list))  if iou_list  else 0.0,
+        'hd95':      float(np.mean(hd95_list)) if hd95_list else 0.0,
+        'asd':       float(np.mean(asd_list))  if asd_list  else 0.0,
+        'per_class': per_class,
     }
 
 def measure_throughput(model, dataloader, device, num_warmup=5):
