@@ -142,9 +142,10 @@ def main():
 
     device = torch.device(training_cfg['device'] if torch.cuda.is_available() else "cpu")
 
-    # ── Per-experiment log subdir (mirrors train.py layout) ────────────
-    eval_name = f"{log_cfg['experiment_name']}_eval"
-    logger, exp_log_dir = setup_logger(log_cfg['log_dir'], eval_name)
+    # ── Logging ────────────────────────────────────────────────────────
+    base_exp     = log_cfg['experiment_name']
+    eval_name = "eval"
+    logger, exp_log_dir = setup_logger(log_cfg['log_dir'], base_exp, eval_name)
     logger.info(f"Using device: {device}")
     logger.info(f"Eval log dir: {exp_log_dir}")
 
@@ -311,7 +312,7 @@ def main():
     reporter.print_console()
     reporter.save(
         report_dir      = exp_log_dir,
-        filename_prefix = log_cfg['experiment_name'],
+        # filename_prefix = log_cfg['experiment_name'],
     )
 
 

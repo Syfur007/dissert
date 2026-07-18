@@ -8,3 +8,8 @@
 /pretrained_pth
 __pycache__/
 *.pyc
+/dashboard
+/exp_dashboard
+exp_dashboard.zip
+.gitignore
+image.py
