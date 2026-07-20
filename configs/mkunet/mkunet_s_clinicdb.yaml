@@ -20,14 +20,14 @@ dataset:
   # val_list:   "data/polyp/ClinicDB/val_list_clinicdb.txt"
   # test_list:  "data/polyp/ClinicDB/test_list_clinicdb.txt"
 
-  img_height: 352
-  img_width: 352
+  img_height: 256
+  img_width: 256
   batch_size: 16
   num_workers: 4
 
 training:
   epochs: 200
-  lr: 0.0001
+  lr: 0.001
   optimizer: "adamw"       # "adam", "adamw", "sgd"
   weight_decay: 0.0001
   momentum: 0.9            # for SGD
@@ -67,5 +67,5 @@ early_stopping:
 logging:
   log_dir: "logs"
   tb_dir: "runs"           # TensorBoard event log directory
-  experiment_name: "mkunet_s_clinicdb_b16"
+  experiment_name: "mkunet_s_clinicdb"
   log_interval: 10         # Print/log training progress every N batches

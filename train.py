@@ -82,7 +82,7 @@ def run_training(config: dict, fold=None) -> float:
     set_seed(training_cfg["seed"])
 
     # ── Logging ────────────────────────────────────────────────────────
-    base_exp        = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb_b16_lr001
+    base_exp        = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
     fold_prefix     = f"_fold{fold}" if fold is not None else ""
     experiment_name = f"{base_exp}{fold_prefix}"          # used for TB / checkpoints
 
