@@ -20,10 +20,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import yaml
 
 # Allow ``python -m datasets.stats`` from the project root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.config import load_config
 
 
 def compute_dataset_stats(pairs: list, split_label: str = "split") -> dict:
@@ -135,8 +136,7 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     pairs = _get_pairs(config, args.split)
     print(

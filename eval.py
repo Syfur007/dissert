@@ -1,7 +1,6 @@
 import os
 import argparse
 import time
-import yaml
 import torch
 import torch.nn as nn
 import numpy as np
@@ -9,6 +8,7 @@ from tqdm import tqdm
 
 from models import get_model
 from datasets import StandardSplitDataModule
+from utils.config import load_config
 from utils import (
     setup_logger,
     compute_dataset_metrics,
@@ -128,8 +128,7 @@ def main():
                         help="Skip confusion matrix / ROC / PR curve generation.")
     args = parser.parse_args()
 
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     if args.dataset_dir is not None:
         config['dataset']['root'] = args.dataset_dir

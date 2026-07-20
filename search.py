@@ -9,6 +9,7 @@ import pandas as pd
 from tabulate import tabulate
 
 from train import run_training
+from utils.config import load_config
 
 def get_grid_paths_and_values(grid_dict, path=None):
     """
@@ -106,11 +107,8 @@ def main():
     args = parser.parse_args()
     
     # Load configs
-    with open(args.base_config, 'r') as f:
-        base_config = yaml.safe_load(f)
-        
-    with open(args.search_config, 'r') as f:
-        search_config = yaml.safe_load(f)
+    base_config = load_config(args.base_config)
+    search_config = load_config(args.search_config)
         
     search_cfg = search_config.get('search', {})
     grid_cfg = search_config.get('grid', {})

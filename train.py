@@ -25,10 +25,10 @@ import random
 
 import numpy as np
 import torch
-import yaml
 
 from datasets import KFoldDataModule, StandardSplitDataModule
 from models import get_model
+from utils.config import load_config
 from training import EMA, Trainer
 from training.callbacks import (
     PeriodicCheckpointCallback,
@@ -322,8 +322,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     # CLI overrides
     if args.fold is not None:
