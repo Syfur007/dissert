@@ -43,7 +43,7 @@ dataset:
   # Guarded by cache_size_limit_gb — silently disabled if the dataset
   # would exceed that footprint.  Worthwhile for small datasets (BUSI,
   # ISIC18) during heavy ablation sweeps.
-  cache: false
+  cache: true
   cache_size_limit_gb: 4.0   # safe for a 16 GB RAM machine
 
   # Auto-split ratios.  Only needed for flat-directory datasets that do not
@@ -63,19 +63,19 @@ dataset:
       shift_limit:  0.1
       scale_limit:  0.1
       rotate_limit: 30
-      p:            0.5
+      p:            0.3
     brightness_contrast:
       brightness_limit: 0.2
       contrast_limit:   0.2
-      p:                0.5
+      p:                0.3
 
 training:
-  epochs: 50
+  epochs: 200
   lr: 0.001
   optimizer: "adamw"       # "adam" | "adamw" | "sgd"
   weight_decay: 0.0001
 
-  # Adam / AdamW betas and epsilon (previously hardcoded to PyTorch defaults)
+  # Adam / AdamW betas and epsilon
   adam_betas: [0.9, 0.999]
   adam_eps: 1.0e-8
 
@@ -92,7 +92,7 @@ training:
   reduce_lr_patience: 5
   reduce_lr_factor: 0.5
 
-  loss_type: "combo"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
+  loss_type: "structure"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
   loss_kwargs: {}          # extra kwargs forwarded to the loss constructor
                            # e.g. for combo: {bce_weight: 0.5, dice_weight: 0.5}
 
@@ -113,7 +113,7 @@ training:
     decay: 0.9999
 
 k_fold:
-  enabled: false           # Set to true to run K-Fold cross validation
+  enabled: true           # Set to true to run K-Fold cross validation
   n_splits: 5              # Number of folds
   run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
 
@@ -126,16 +126,10 @@ checkpoint:
   periodic_save_every: 0   # Save epoch_NNNN.pth every N epochs; 0 = disabled
 
 early_stopping:
-  enabled: false           # Set to true to enable early stopping
-  patience: 20             # Epochs to wait without improvement before stopping
-  min_delta: 0.0           # Minimum absolute change to count as an improvement
+  enabled: true           # Set to true to enable early stopping
+  patience: 15             # Epochs to wait without improvement before stopping
+  min_delta: 0.0001           # Minimum absolute change to count as an improvement
   # mode is inherited from checkpoint.mode; no need to repeat it here
-
-logging:
-  log_dir: "logs"
-  tb_dir: "runs"           # TensorBoard event log directory
-  experiment_name: "clinicdb_unet"
-  log_interval: 10         # Print/log training progress every N batches
 
   # Prediction overlay visualisation.
   # A side-by-side [Input | Ground Truth | Prediction] grid is saved every
@@ -160,3 +154,9 @@ logging:
 #     freeze: ["encoder"]       # freeze all encoder submodules
 stages: []                    # empty list = use legacy training.epochs / training.lr
 
+
+logging:
+  log_dir: "logs"
+  tb_dir: "runs"           # TensorBoard event log directory
+  experiment_name: "clinicdb_unet"
+  log_interval: 10         # Print/log training progress every N batches
