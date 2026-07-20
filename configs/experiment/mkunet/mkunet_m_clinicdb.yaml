@@ -157,5 +157,5 @@ stages: []                    # empty list = use legacy training.epochs / traini
 logging:
   log_dir: "logs"
   tb_dir: "runs"           # TensorBoard event log directory
-  experiment_name: "mkunet_clinicdb"
+  experiment_name: "mkunet_m_clinicdb"
   log_interval: 10         # Print/log training progress every N batches
