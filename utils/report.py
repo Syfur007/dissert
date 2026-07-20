@@ -335,8 +335,8 @@ class EvaluationReporter:
             cfg_m  = self.config.get("model", {})
             input_shape = (
                 cfg_m.get("in_channels", 3),
-                cfg_ds.get("img_height", 352),
-                cfg_ds.get("img_width", 352),
+                cfg_ds.get("img_height", 256),
+                cfg_ds.get("img_width", 256),
             )
             try:
                 if self.logger:

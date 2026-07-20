@@ -170,8 +170,9 @@ class PredictionOverlayCallback(Callback):
     """Save side-by-side prediction vs. ground-truth overlay grids every N epochs.
 
     Grabs the first ``n_samples`` images from the first batch of
-    ``val_loader`` and produces a ``[Input | Ground Truth | Prediction]``
-    grid saved as ``overlay_epoch_{epoch:04d}.png`` in ``save_dir``.
+    ``val_loader`` and produces a ``[Input Image | Ground Truth Mask |
+    Prediction Mask | Ground Truth Overlay on Image | Prediction Overlay on
+    Image]`` grid saved as ``overlay_epoch_{epoch:04d}.png`` in ``save_dir``.
 
     Optionally logs the grid image to TensorBoard if ``tb_tracker`` is provided.
 
@@ -269,13 +270,40 @@ class PredictionOverlayCallback(Callback):
         # Normalise input images for display (first channel shown for grayscale; RGB for 3-ch)
         imgs_np = imgs.cpu().numpy()
 
-        # Build grid: n rows × 3 columns [Input | GT | Pred]
-        n_cols = 3
+        def make_overlay(base_img: np.ndarray, mask_img: np.ndarray) -> np.ndarray:
+            """Blend a mask onto the image for a quick overlay preview."""
+            if base_img.shape[0] == 3:
+                base = np.transpose(base_img, (1, 2, 0))
+            else:
+                base = np.repeat(base_img[:1].transpose(1, 2, 0), 3, axis=2)
+
+            base = (base - base.min()) / (base.max() - base.min() + 1e-8)
+            mask = mask_img.astype(np.float32)
+
+            if mask.max() > 1:
+                cmap = plt.get_cmap("tab20")
+                colors = cmap((mask.astype(np.int32) % 20) / 19.0)[..., :3]
+                alpha = (mask > 0)[..., None].astype(np.float32) * 0.45
+            else:
+                colors = np.zeros((*mask.shape, 3), dtype=np.float32)
+                colors[..., 1] = mask
+                alpha = mask[..., None] * 0.45
+
+            return np.clip(base * (1.0 - alpha) + colors * alpha, 0.0, 1.0)
+
+        # Build grid: n rows × 5 columns [Input | GT Mask | Pred Mask | GT Overlay | Pred Overlay]
+        n_cols = 5
         fig, axes = plt.subplots(n, n_cols, figsize=(n_cols * 3, n * 3))
         if n == 1:
             axes = axes[np.newaxis, :]
 
-        col_titles = ["Input", "Ground Truth", "Prediction"]
+        col_titles = [
+            "Image",
+            "GT Mask",
+            "Prediction Mask",
+            "GT Overlay",
+            "Prediction Overlay",
+        ]
         for col, title in enumerate(col_titles):
             axes[0, col].set_title(title, fontsize=11, fontweight="bold")
 
@@ -293,6 +321,8 @@ class PredictionOverlayCallback(Callback):
             axes[row, 0].imshow(img_disp, cmap=None if img.shape[0] == 3 else "gray")
             axes[row, 1].imshow(gts[row],   cmap="tab20" if gts[row].max() > 1 else "gray")
             axes[row, 2].imshow(preds[row], cmap="tab20" if preds[row].max() > 1 else "gray")
+            axes[row, 3].imshow(make_overlay(img, gts[row]))
+            axes[row, 4].imshow(make_overlay(img, preds[row]))
 
             for col in range(n_cols):
                 axes[row, col].axis("off")
