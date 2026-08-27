@@ -161,6 +161,14 @@ class LGAG(nn.Module):
 
         if kernel_size == 1:
             groups = 1
+        if F_g % groups != 0 or F_l % groups != 0 or F_int % groups != 0:
+            raise ValueError(
+                f"LGAG: groups={groups} must evenly divide F_g={F_g}, "
+                f"F_l={F_l}, and F_int={F_int}. This is normally called "
+                f"with groups=channels[i]//2, so an odd channel count at "
+                f"that stage is what triggers this — use an even "
+                f"'channels' list, or pass a compatible 'groups' explicitly."
+            )
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=kernel_size, stride=1, padding=kernel_size//2, groups=groups, bias=True),
             nn.BatchNorm2d(F_int)
@@ -177,10 +185,10 @@ class LGAG(nn.Module):
         self.activation = act_layer(activation, inplace=True)
 
         self.init_weights('normal')
-    
+
     def init_weights(self, scheme=''):
         named_apply(partial(_init_weights, scheme=scheme), self)
-                
+
     def forward(self, g, x):
         g1 = self.W_g(g)
         x1 = self.W_x(x)

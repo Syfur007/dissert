@@ -1,12 +1,26 @@
+# PyTorch: pinned to match the versions this project is developed/tested against.
+# The plain PyPI wheels below are CPU-only; for a CUDA build, install from
+# https://download.pytorch.org/whl/cu113 instead (e.g.
+# `pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 --extra-index-url https://download.pytorch.org/whl/cu113`)
+# before running `pip install -r requirements.txt`.
+torch==1.11.0
+torchvision==0.12.0
+
+# Numeric stack pinned together (not just numpy) — these are the exact
+# versions this project is developed/tested against. scipy/scikit-learn/
+# scikit-image/pandas were previously left unbounded next to a hard-pinned
+# numpy, which risked pip resolving a newer release that's dropped support
+# for numpy 1.22's ABI.
 numpy==1.22.4
+scipy==1.10.1
+scikit-learn==1.3.2
+scikit-image==0.21.0
+pandas==2.0.3
+
 loguru
 tqdm
 pyyaml
-pandas
 matplotlib
-scikit-learn
-scikit-image
-scipy
 opencv-python
 seaborn
 albumentations==1.1.0
@@ -25,7 +39,7 @@ timm==0.6.12
 tifffile
 pillow
 thop
-# simpleitk
+simpleitk
 nibabel
 h5py
 huggingface-hub==0.11.0

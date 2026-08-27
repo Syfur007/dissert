@@ -134,6 +134,15 @@ class GroupedAttentionGate(nn.Module):
         super().__init__()
         if kernel_size == 1:
             groups = 1
+        if F_g % groups != 0 or F_l % groups != 0 or F_int % groups != 0 or (F_rgb is not None and F_rgb % groups != 0):
+            raise ValueError(
+                f"GroupedAttentionGate: groups={groups} must evenly divide "
+                f"F_g={F_g}, F_l={F_l}, F_int={F_int}"
+                + (f", and F_rgb={F_rgb}" if F_rgb is not None else "")
+                + ". This is normally called with groups=channels[i]//2, so "
+                "an odd channel count at that stage is what triggers this — "
+                "use an even 'channels' list, or pass a compatible 'groups' explicitly."
+            )
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g,   F_int, kernel_size, padding=kernel_size // 2, groups=groups, bias=True),
             nn.BatchNorm2d(F_int),
@@ -145,7 +154,7 @@ class GroupedAttentionGate(nn.Module):
         self.W_r = None
         if F_rgb is not None:
             self.W_r = nn.Sequential(
-                nn.Conv2d(F_rgb, F_int, kernel_size, padding=kernel_size // 2, bias=True),
+                nn.Conv2d(F_rgb, F_int, kernel_size, padding=kernel_size // 2, groups=groups, bias=True),
                 nn.BatchNorm2d(F_int),
             )
         self.psi = nn.Sequential(
@@ -289,28 +298,33 @@ class GMK_UNet(nn.Module):
         # are wasted).
         rgb_skips = (r4, r3, r2, r1) if self.use_rgb_skip else (None, None, None, None)
 
+        # size= (not scale_factor=) so each upsample lands exactly on its
+        # skip tensor's spatial dims even when H/W aren't multiples of 32 —
+        # floor-division in the encoder's max_pool2d can make the
+        # exact-scale_factor-2 upsample a pixel or two off from the skip
+        # tensor it's about to be gated/added against.
         out = self.CA1(out) * out
         out = self.SA(out)  * out
-        out = F.relu(F.interpolate(self.decoder1(out), scale_factor=2, mode='bilinear', align_corners=False))
+        out = F.relu(F.interpolate(self.decoder1(out), size=s4.shape[2:], mode='bilinear', align_corners=False))
         out = out + self.AG1(g=out, x=s4, x_rgb=rgb_skips[0])
 
         out = self.CA2(out) * out
         out = self.SA(out)  * out
-        out = F.relu(F.interpolate(self.decoder2(out), scale_factor=2, mode='bilinear', align_corners=False))
+        out = F.relu(F.interpolate(self.decoder2(out), size=s3.shape[2:], mode='bilinear', align_corners=False))
         out = out + self.AG2(g=out, x=s3, x_rgb=rgb_skips[1])
 
         out = self.CA3(out) * out
         out = self.SA(out)  * out
-        out = F.relu(F.interpolate(self.decoder3(out), scale_factor=2, mode='bilinear', align_corners=False))
+        out = F.relu(F.interpolate(self.decoder3(out), size=s2.shape[2:], mode='bilinear', align_corners=False))
         out = out + self.AG3(g=out, x=s2, x_rgb=rgb_skips[2])
 
         out = self.CA4(out) * out
         out = self.SA(out)  * out
-        out = F.relu(F.interpolate(self.decoder4(out), scale_factor=2, mode='bilinear', align_corners=False))
+        out = F.relu(F.interpolate(self.decoder4(out), size=s1.shape[2:], mode='bilinear', align_corners=False))
         out = out + self.AG4(g=out, x=s1, x_rgb=rgb_skips[3])
 
         out = self.CA5(out) * out
         out = self.SA(out)  * out
-        out = F.relu(F.interpolate(self.decoder5(out), scale_factor=2, mode='bilinear', align_corners=False))
+        out = F.relu(F.interpolate(self.decoder5(out), size=x.shape[2:], mode='bilinear', align_corners=False))
 
         return self.out(out)

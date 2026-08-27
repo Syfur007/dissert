@@ -131,13 +131,6 @@ early_stopping:
   min_delta: 0.0001           # Minimum absolute change to count as an improvement
   # mode is inherited from checkpoint.mode; no need to repeat it here
 
-  # Prediction overlay visualisation.
-  # A side-by-side [Input | Ground Truth | Prediction] grid is saved every
-  # `overlay_save_every` epochs.  Set to 0 or `save_overlays: false` to disable.
-  save_overlays: true
-  overlay_save_every: 10   # epoch interval (default: every 10 epochs)
-  overlay_n_samples: 4     # number of images per grid
-
 # ---------------------------------------------------------------------------
 # Multi-stage training (optional).
 # When present, Trainer.fit() iterates these stages sequentially instead of
@@ -160,3 +153,10 @@ logging:
   tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "clinicdb_unet"
   log_interval: 10         # Print/log training progress every N batches
+
+  # Prediction overlay visualisation.
+  # A side-by-side [Input | Ground Truth | Prediction] grid is saved every
+  # `overlay_save_every` epochs.  Set to 0 or `save_overlays: false` to disable.
+  save_overlays: true
+  overlay_save_every: 10   # epoch interval (default: every 10 epochs)
+  overlay_n_samples: 4     # number of images per grid

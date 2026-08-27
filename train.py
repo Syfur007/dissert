@@ -153,7 +153,7 @@ def run_training(config: dict, fold=None) -> float:
         save_dir        = checkpoint_dir,
         monitor_metric  = chk_cfg.get("monitor_metric", "val_dice"),
         mode            = chk_cfg.get("mode", "max"),
-        periodic_every  = chk_cfg.get("periodic_save_every", 0),
+        min_delta       = es_cfg.get("min_delta", 0.0),
     )
 
     es_mode      = chk_cfg.get("mode", "max")
@@ -239,6 +239,21 @@ def run_training(config: dict, fold=None) -> float:
             start_epoch += 1
             if loaded_metric is not None:
                 chk_manager.best_metric = loaded_metric
+
+            # The historical best score lives in best{fold_suffix}.pth, not
+            # necessarily in whatever checkpoint we just resumed from (that's
+            # usually last.pth, whose metric_val is only the last completed
+            # epoch's score). Re-seed best_metric from the actual best
+            # checkpoint so a resumed run can't mistake a mediocre epoch for
+            # an improvement and overwrite a genuinely better checkpoint.
+            best_path = os.path.join(checkpoint_dir, f"best{fold_suffix}.pth")
+            if os.path.exists(best_path):
+                best_ckpt = torch.load(best_path, map_location="cpu")
+                if best_ckpt.get("metric_val") is not None:
+                    chk_manager.best_metric = best_ckpt["metric_val"]
+                    logger.info(
+                        f"Resumed best_metric from {best_path}: {chk_manager.best_metric:.4f}"
+                    )
 
             raw_ckpt = torch.load(chk_path, map_location="cpu")
 
@@ -355,16 +370,35 @@ def main():
         run_folds  = kfold_cfg.get("run_folds") or list(range(n_splits))
 
         print(f"K-Fold Cross Validation ({n_splits} splits) over folds: {run_folds}")
-        fold_scores = []
+        fold_results = []
         for f in run_folds:
             print(f"\n{'='*20} TRAINING FOLD {f} {'='*20}")
-            fold_scores.append(run_training(config, fold=f))
+            try:
+                fold_results.append((f, run_training(config, fold=f), None))
+            except Exception as e:
+                # Don't let one bad fold (e.g. a CUDA OOM) take down the
+                # whole multi-hour sweep and lose every already-completed
+                # fold's results — log it and move on, same as search.py
+                # already does per-trial.
+                print(f"Fold {f} failed with error: {e}")
+                fold_results.append((f, None, str(e)))
 
         print(f"\n{'='*20} K-FOLD SUMMARY {'='*20}")
         print(f"Metric ({config['checkpoint']['monitor_metric']}) per fold:")
-        for idx, score in zip(run_folds, fold_scores):
-            print(f"  Fold {idx}: {score:.4f}")
-        print(f"Mean: {np.mean(fold_scores):.4f} ± {np.std(fold_scores):.4f}")
+        successful_scores = []
+        for f, score, error in fold_results:
+            if error is None:
+                print(f"  Fold {f}: {score:.4f}")
+                successful_scores.append(score)
+            else:
+                print(f"  Fold {f}: FAILED — {error}")
+        if successful_scores:
+            print(
+                f"Mean: {np.mean(successful_scores):.4f} ± {np.std(successful_scores):.4f} "
+                f"(over {len(successful_scores)}/{len(run_folds)} successful folds)"
+            )
+        else:
+            print("No folds completed successfully.")
     else:
         run_training(config, fold=args.fold)
 

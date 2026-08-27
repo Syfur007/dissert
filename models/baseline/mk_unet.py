@@ -18,6 +18,14 @@ class GroupedAttentionGate(nn.Module):
         super(GroupedAttentionGate,self).__init__()
         if kernel_size == 1:
             groups = 1
+        if F_g % groups != 0 or F_l % groups != 0 or F_int % groups != 0:
+            raise ValueError(
+                f"GroupedAttentionGate: groups={groups} must evenly divide "
+                f"F_g={F_g}, F_l={F_l}, and F_int={F_int}. This is normally "
+                f"called with groups=channels[i]//2, so an odd channel "
+                f"count at that stage is what triggers this — use an even "
+                f"'channels' list, or pass a compatible 'groups' explicitly."
+            )
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=kernel_size,stride=1,padding=kernel_size//2,groups=groups, bias=True),
             nn.BatchNorm2d(F_int)
@@ -222,48 +230,52 @@ class MK_UNet_Base(nn.Module):
         ### Stage 4
         out = self.CA1(out) * out
         out = self.SA(out) * out
-        out = F.relu(F.interpolate(self.decoder1(out), scale_factor=(2, 2), mode='bilinear')) 
+        # size= (not scale_factor=) so this lands exactly on t4's spatial
+        # dims even when H/W aren't multiples of 32 — floor-division in the
+        # encoder's max_pool2d can make the exact-scale_factor-2 upsample a
+        # pixel or two off from the skip tensor it's about to be added to.
+        out = F.relu(F.interpolate(self.decoder1(out), size=t4.shape[2:], mode='bilinear'))
         t4 = self.AG1(g=out, x=t4)
         out = torch.add(out, t4)
 
         ### Stage 3
         out = self.CA2(out) * out
         out = self.SA(out) * out
-        out = F.relu(F.interpolate(self.decoder2(out), scale_factor=(2, 2), mode='bilinear')) 
-        
+        out = F.relu(F.interpolate(self.decoder2(out), size=t3.shape[2:], mode='bilinear'))
+
         p1 = None
         if self.deep_supervision and self.training:
             p1 = F.interpolate(self.out1(out), scale_factor=(8, 8), mode='bilinear')
-            
+
         t3 = self.AG2(g=out, x=t3)
         out = torch.add(out, t3)
 
         out = self.CA3(out) * out
         out = self.SA(out) * out
-        out = F.relu(F.interpolate(self.decoder3(out), scale_factor=(2, 2), mode='bilinear')) 
-        
+        out = F.relu(F.interpolate(self.decoder3(out), size=t2.shape[2:], mode='bilinear'))
+
         p2 = None
         if self.deep_supervision and self.training:
             p2 = F.interpolate(self.out2(out), scale_factor=(4, 4), mode='bilinear')
-            
+
         t2 = self.AG3(g=out, x=t2)
         out = torch.add(out, t2)
 
         out = self.CA4(out) * out
         out = self.SA(out) * out
-        out = F.relu(F.interpolate(self.decoder4(out), scale_factor=(2, 2), mode='bilinear')) 
-        
+        out = F.relu(F.interpolate(self.decoder4(out), size=t1.shape[2:], mode='bilinear'))
+
         p3 = None
         if self.deep_supervision and self.training:
             p3 = F.interpolate(self.out3(out), scale_factor=(2, 2), mode='bilinear')
-            
+
         t1 = self.AG4(g=out, x=t1)
         out = torch.add(out, t1)
 
         out = self.CA5(out) * out
         out = self.SA(out) * out
-        out = F.relu(F.interpolate(self.decoder5(out), scale_factor=(2, 2), mode='bilinear')) 
-       
+        out = F.relu(F.interpolate(self.decoder5(out), size=x.shape[2:], mode='bilinear'))
+
         p4 = self.out4(out)
 
         if self.deep_supervision and self.training:

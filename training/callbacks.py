@@ -18,10 +18,13 @@ TrainingCurvePlotCallback    — dumps offline matplotlib PNGs at training end
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 import torch
+
+from utils import atomic_torch_save
 
 if TYPE_CHECKING:
     # Avoid circular import at runtime; only for type hints.
@@ -125,7 +128,7 @@ class PeriodicCheckpointCallback(Callback):
         if trainer.scaler is not None:
             state["scaler_state"] = trainer.scaler.state_dict()
 
-        torch.save(state, path)
+        atomic_torch_save(state, path)
         trainer.logger.info(f"[PeriodicCheckpoint] Saved snapshot → {path}")
 
 
@@ -247,12 +250,18 @@ class PredictionOverlayCallback(Callback):
         is_bin = trainer.model.training  # save state
 
         trainer.model.eval()
-        with torch.no_grad():
-            if trainer._use_amp:
-                with torch.cuda.amp.autocast():
+        # If EMA is enabled, the epoch's logged metrics came from validating
+        # under the EMA shadow weights (Trainer._run_validate) — run the
+        # overlay forward pass under those same weights, otherwise the saved
+        # image doesn't correspond to the score reported alongside it.
+        ema_ctx = trainer.ema.average_parameters() if trainer.ema is not None else nullcontext()
+        with ema_ctx:
+            with torch.no_grad():
+                if trainer._use_amp:
+                    with torch.cuda.amp.autocast():
+                        outputs = trainer.model(imgs)
+                else:
                     outputs = trainer.model(imgs)
-            else:
-                outputs = trainer.model(imgs)
 
         if is_bin:
             trainer.model.train()

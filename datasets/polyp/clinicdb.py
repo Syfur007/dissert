@@ -74,10 +74,14 @@ class ClinicDB:
         Return all (img_path, mask_path) pairs from train+val splits.
         Used by the datamodule to build k-fold cross-validation splits.
         The test split is intentionally excluded so it remains a held-out set.
+
+        Delegates to get_dataset() rather than pairing filenames directly,
+        so k-fold splitting shares the same mask-filename resolution
+        (case/suffix tolerant — handles `_mask`/`_gt` suffixes etc.) as every
+        other code path instead of assuming image and mask filenames match
+        byte-for-byte.
         """
         pairs = []
         for split in ("train", "val"):
-            img_dir, mask_dir, names = self._resolve_files(split)
-            for name in names:
-                pairs.append((os.path.join(img_dir, name), os.path.join(mask_dir, name)))
+            pairs.extend(self.get_dataset(split).pairs)
         return pairs

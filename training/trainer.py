@@ -28,7 +28,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-from utils import CheckpointManager, EarlyStopping, compute_dataset_metrics
+from utils import CheckpointManager, EarlyStopping, compute_dataset_metrics, atomic_torch_save
 from training.callbacks import Callback
 from training.ema import EMA
 from training.optimizers import build_optimizer, build_scheduler
@@ -245,8 +245,8 @@ class Trainer:
                 is_best=is_best,
                 scaler=self.scaler,
             )
-            # Persist extra state (RNG + EarlyStopper) into the last checkpoint
-            self._persist_extra_state(epoch)
+            # Persist extra state (RNG + EarlyStopper + EMA) into the checkpoint(s)
+            self._persist_extra_state(epoch, is_best)
 
             # Early stopping
             if self.early_stopper is not None and self.early_stopper(monitored_val):
@@ -282,14 +282,26 @@ class Trainer:
                 f"lr={stage_lr} | freeze={freeze_keys}"
             )
 
-            # Rebuild optimizer with stage LR so frozen params are excluded
-            stage_tcfg = {**self._tcfg, "lr": stage_lr}
-            trainable  = filter(lambda p: p.requires_grad, self.model.parameters())
-            self.optimizer = build_optimizer(stage_tcfg, trainable)
-            self.scheduler, self.scheduler_step_mode = build_scheduler(
-                stage_tcfg, self.optimizer,
-                steps_per_epoch=len(self.train_loader),
-            )
+            # Rebuild optimizer with stage LR so frozen params are excluded —
+            # except when resuming *into the middle* of this stage, where
+            # self.optimizer/self.scheduler already hold the state a prior
+            # run's checkpoint restored. Rebuilding unconditionally here would
+            # discard that resumed state (Adam moments, LR schedule position)
+            # before a single epoch of this stage even runs.
+            resuming_mid_stage = epoch_cursor < start_epoch <= stage_end
+            if resuming_mid_stage:
+                self.logger.info(
+                    f"[Stage {stage_idx}] resuming mid-stage at epoch {start_epoch}; "
+                    "keeping the already-loaded optimizer/scheduler instead of rebuilding."
+                )
+            else:
+                stage_tcfg = {**self._tcfg, "lr": stage_lr}
+                trainable  = filter(lambda p: p.requires_grad, self.model.parameters())
+                self.optimizer = build_optimizer(stage_tcfg, trainable)
+                self.scheduler, self.scheduler_step_mode = build_scheduler(
+                    stage_tcfg, self.optimizer,
+                    steps_per_epoch=len(self.train_loader),
+                )
 
             # Run this stage's epoch range (skip completed epochs on resume)
             effective_start = max(start_epoch, epoch_cursor)
@@ -371,8 +383,14 @@ class Trainer:
                     outputs = self.model(imgs_s)
                     loss    = self.criterion(outputs, masks_s)
 
-                # Scale loss for gradient accumulation
-                loss = loss / self._accum_steps
+                # Scale loss for gradient accumulation *and* for however many
+                # scales run this batch — each scale's backward() call adds
+                # into the same .grad (accumulation doesn't zero between
+                # them), so without dividing by len(scales_this_batch) too,
+                # "all_scales" mode's effective gradient per optimizer step
+                # would be ~N times larger than a single-scale run at the
+                # same accumulate_grad_batches.
+                loss = loss / (self._accum_steps * len(scales_this_batch))
 
                 # Backward
                 if self._use_amp:
@@ -380,10 +398,17 @@ class Trainer:
                 else:
                     loss.backward()
 
-                last_loss_value = loss.item() * self._accum_steps  # unscaled for display
+                last_loss_value = loss.item() * self._accum_steps * len(scales_this_batch)  # unscaled for display
 
-                # Rolling Dice/IoU — computed only on the tracking scale, no extra memory
-                if scale == track_scale:
+                # Rolling Dice/IoU. In "all_scales" mode, deliberately only
+                # tracked at track_scale so the reported per-epoch loss/dice
+                # stays comparable across configs regardless of how many
+                # scales run per batch. In "random" mode only one scale ever
+                # runs per batch and it may not be track_scale — tracking
+                # unconditionally there (instead of only when it happens to
+                # match track_scale) avoids an epoch where track_scale is
+                # never chosen leaving these stats at a fabricated 0.
+                if scale == track_scale or ms_mode == "random":
                     running_loss    += last_loss_value * imgs_s.size(0)
                     running_samples += imgs_s.size(0)
                     with torch.no_grad():
@@ -525,31 +550,35 @@ class Trainer:
         verb = "Froze" if frozen else "Unfroze"
         self.logger.info(f"{verb} modules matching: {name_fragments}")
 
-    def _persist_extra_state(self, epoch: int) -> None:
-        """Append EarlyStopping and RNG states to the last checkpoint in-place.
+    def _persist_extra_state(self, epoch: int, is_best: bool = False) -> None:
+        """Append EarlyStopping, RNG, and EMA states to the checkpoint(s) in-place.
 
-        This keeps the checkpoint self-contained so a resumed run can fully
-        reconstruct training state without extra side-files.
+        Always updates the last-epoch checkpoint; also updates the best
+        checkpoint when *is_best*. This matters for EMA: validation runs
+        under the EMA shadow weights, so "is_best" reflects the EMA model's
+        score — without this, ``best.pth`` would only ever contain the raw
+        (non-averaged) weights and never the shadow weights that actually
+        produced the reported best metric.
         """
-        last_path = os.path.join(self._chk_dir, f"last{self._fold_suffix}.pth")
-        if not os.path.exists(last_path):
-            return
-
-        extra = torch.load(last_path, map_location="cpu")
-
-        # RNG states
-        extra["rng_state_python"] = random.getstate()
-        extra["rng_state_numpy"]  = np.random.get_state()
-        extra["rng_state_torch"]  = torch.get_rng_state()
+        extra_common: Dict[str, Any] = {
+            "rng_state_python": random.getstate(),
+            "rng_state_numpy":  np.random.get_state(),
+            "rng_state_torch":  torch.get_rng_state(),
+        }
         if torch.cuda.is_available():
-            extra["rng_state_cuda"] = torch.cuda.get_rng_state_all()
-
-        # EarlyStopper
+            extra_common["rng_state_cuda"] = torch.cuda.get_rng_state_all()
         if self.early_stopper is not None:
-            extra["early_stopper_state"] = self.early_stopper.state_dict()
-
-        # EMA shadow weights
+            extra_common["early_stopper_state"] = self.early_stopper.state_dict()
         if self.ema is not None:
-            extra["ema_state"] = self.ema.state_dict()
+            extra_common["ema_state"] = self.ema.state_dict()
 
-        torch.save(extra, last_path)
+        targets = [os.path.join(self._chk_dir, f"last{self._fold_suffix}.pth")]
+        if is_best:
+            targets.append(os.path.join(self._chk_dir, f"best{self._fold_suffix}.pth"))
+
+        for path in targets:
+            if not os.path.exists(path):
+                continue
+            extra = torch.load(path, map_location="cpu")
+            extra.update(extra_common)
+            atomic_torch_save(extra, path)

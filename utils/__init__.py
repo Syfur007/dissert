@@ -1,6 +1,6 @@
 from .logger import setup_logger, TensorBoardTracker
 from .early_stopping import EarlyStopping
-from .checkpoint import CheckpointManager
+from .checkpoint import CheckpointManager, atomic_torch_save
 from .metrics import (
     count_parameters,
     get_binary_metrics,
@@ -29,6 +29,7 @@ __all__ = [
     "TensorBoardTracker",
     # training utilities
     "CheckpointManager",
+    "atomic_torch_save",
     "EarlyStopping",
     # metrics
     "count_parameters",

@@ -59,7 +59,8 @@ python datasets/dataset.py  # Runs basic loader checks
 
 Training parameters are configured in `configs/base_config.yaml`. You can override configurations via command line flags:
 
-*   **Standard Training**:
+*   **Train All Folds Sequentially (default)**:
+    `configs/base_config.yaml` ships with `k_fold.enabled: true`, so this plain command runs the *full K-Fold cross-validation sweep*, not a single train/val split:
     ```bash
     python train.py --config configs/base_config.yaml --epochs 50 --batch-size 8
     ```
@@ -67,10 +68,10 @@ Training parameters are configured in `configs/base_config.yaml`. You can overri
     ```bash
     python train.py --fold 0
     ```
-*   **Train All Folds Sequentially**:
-    Enable K-fold in `configs/base_config.yaml` (`k_fold.enabled: true`) and run:
+*   **Standard Training** (single train/val split, no cross-validation):
+    Set `k_fold.enabled: false` in your config — see `configs/base_test_config.yaml` for a working example — then run:
     ```bash
-    python train.py
+    python train.py --config configs/base_test_config.yaml
     ```
 *   **Resume Training**:
     ```bash

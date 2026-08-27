@@ -163,6 +163,15 @@ class BaseDataModule:
             pin_memory     = True,
             worker_init_fn = _make_worker_init_fn(self._seed),
         )
+        # persistent_workers keeps worker processes (and their RNG state)
+        # alive across epochs. Without it, workers respawn every epoch and
+        # worker_init_fn reseeds them with the *same* fixed seed each time —
+        # since Albumentations decides whether to apply a transform via the
+        # bare global `random`/`np.random` calls, that means every epoch
+        # applies the exact same sequence of augmentations to the same
+        # samples, silently collapsing augmentation diversity across a run.
+        if ds_cfg["num_workers"] > 0:
+            self._ldr_kw["persistent_workers"] = True
 
         # ── Dataset construction kwargs (validate / cache) ────────────────
         self._ds_kwargs = dict(
@@ -226,6 +235,21 @@ class KFoldDataModule(BaseDataModule):
     Fold assignments are serialised to ``<checkpoint_dir>/<exp>/fold_splits.json``
     on the first call to ``get_fold_loaders`` and reloaded on subsequent calls,
     so resumed runs always use the same split.
+
+    CAUTION — frame-level splitting, no video/sequence grouping:
+    Folds are drawn from ``sklearn.model_selection.KFold`` over individual
+    (image, mask) pairs. CVC-ClinicDB and CVC-ColonDB are frame extracts
+    from a small number of colonoscopy video sequences, so numerically
+    nearby frames are often near-duplicates of the same polyp from the same
+    sequence. A plain per-frame KFold can place near-duplicate frames in
+    both the train and validation side of a fold, which would inflate
+    validation Dice/mIoU relative to true generalisation. Fixing this
+    properly needs a frame → source-video mapping (for
+    ``sklearn.model_selection.GroupKFold``) that isn't recoverable from the
+    filenames shipped with this dataset (they're flat sequential integers
+    with no encoded sequence id) — so it isn't implemented here. If you
+    have that mapping for your data, group-aware splitting should replace
+    the plain ``KFold`` call in ``_load_or_create_fold_splits`` below.
     """
 
     def __init__(self, config: dict):
@@ -252,15 +276,30 @@ class KFoldDataModule(BaseDataModule):
         Load fold splits from disk if available, otherwise compute and persist them.
         Returns a list of dicts: ``[{'train': [[img, mask], ...], 'val': [...]}, ...]``.
         """
+        n_splits = self.kf_cfg.get("n_splits", 5)
+
         if os.path.exists(self._fold_file):
             with open(self._fold_file) as f:
-                return json.load(f)["folds"]
+                cached = json.load(f)
+            if cached.get("n_splits") == n_splits and cached.get("seed") == self._seed:
+                return cached["folds"]
+            logger.warning(
+                f"Cached fold splits at {self._fold_file} were built with "
+                f"n_splits={cached.get('n_splits')}, seed={cached.get('seed')}, but "
+                f"the current config requests n_splits={n_splits}, seed={self._seed}. "
+                "Regenerating fold splits — the old file will be overwritten. "
+                "Any checkpoint resumed against a specific fold index may no "
+                "longer correspond to the same data as before."
+            )
 
-        n_splits  = self.kf_cfg.get("n_splits", 5)
         all_pairs = np.array(self.handler.get_kfold_pairs())
         if len(all_pairs) == 0:
             raise RuntimeError("No samples found for k-fold splitting.")
 
+        # Frame-level split — no video/sequence grouping. See the class
+        # docstring above: near-duplicate frames from the same source video
+        # can land in both sides of a fold. Swap for GroupKFold if you have
+        # a frame → video mapping for your data.
         kf    = KFold(n_splits=n_splits, shuffle=True, random_state=self._seed)
         folds = [
             {"train": all_pairs[ti].tolist(), "val": all_pairs[vi].tolist()}

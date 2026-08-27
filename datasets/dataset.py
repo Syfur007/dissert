@@ -152,12 +152,26 @@ class MedicalSegmentationDataset(Dataset):
             f"Caching {len(self.pairs)} pairs into RAM "
             f"(~{estimated_gb:.2f} GB)..."
         )
+        broken = []
         for idx, (img_path, mask_path) in enumerate(self.pairs):
             img  = cv2.imread(img_path)
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            if img is None or mask is None:
+                # Don't cache a broken pair — leave it out of self._cache so
+                # __getitem__ falls through to its non-cached path, which
+                # raises a clear FileNotFoundError naming the missing file
+                # instead of silently handing None to the transform
+                # pipeline (an opaque crash deep inside albumentations,
+                # far from the actual cause).
+                broken.append(img_path if img is None else mask_path)
+                continue
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self._cache[idx] = (img, mask)
+        if broken:
+            logger.warning(
+                f"Cache: {len(broken)} pair(s) could not be read and were "
+                f"left uncached (will raise on access): {broken}"
+            )
         logger.info("Caching complete.")
 
     # ------------------------------------------------------------------
@@ -192,6 +206,11 @@ class MedicalSegmentationDataset(Dataset):
             mask = mask.unsqueeze(0)
 
         if mask.max() > 1.0:
-            mask = mask / 255.0
+            # Binarize rather than dividing unthresholded: some source masks
+            # (e.g. ClinicDB) aren't strictly {0, 255} — antialiased/
+            # compressed edges leave intermediate grey values, which would
+            # otherwise become fractional soft labels concentrated exactly
+            # at object boundaries, where HD95/ASD are most sensitive.
+            mask = (mask > 127).float()
 
         return image, mask.float()

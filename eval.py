@@ -51,9 +51,20 @@ def load_checkpoint_into(model, checkpoint_path, device, logger):
     Loads a checkpoint's state dict into model, logging any key mismatches
     instead of silently swallowing them (strict=False can otherwise hide a
     checkpoint/architecture mismatch that would quietly corrupt metrics).
+
+    Prefers EMA shadow weights over the raw weights when the checkpoint
+    carries an ``ema_state`` (i.e. training used EMA). Validation during
+    training runs under the EMA-averaged weights, so those — not the raw
+    weights — are what actually produced the metric this checkpoint was
+    saved for.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint['model_state_dict']
+    ema_state = checkpoint.get('ema_state')
+    if ema_state and ema_state.get('shadow_state_dict'):
+        logger.info(f"Checkpoint carries EMA shadow weights; using those instead of raw weights: {checkpoint_path}")
+        state_dict = ema_state['shadow_state_dict']
+    else:
+        state_dict = checkpoint['model_state_dict']
 
     # Drop thop's leftover profiling buffers (e.g. "encoder1.0.total_ops")
     # before diffing/loading -- they're not real weights and shouldn't be

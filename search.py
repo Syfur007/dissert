@@ -6,6 +6,7 @@ import random
 import itertools
 import yaml
 import pandas as pd
+import torch
 from tabulate import tabulate
 
 from train import run_training
@@ -174,11 +175,17 @@ def main():
         
         # Disable K-Fold during search to keep individual trial times short
         trial_config['k_fold']['enabled'] = False
-        
+
+        # Force a clean start for every trial. Without this, re-running a
+        # sweep with the same output_dir after an interruption would resume
+        # from whatever checkpoint an earlier run of this same trial name
+        # left behind — silently changing results rather than restarting.
+        trial_config.setdefault('checkpoint', {})['resume'] = False
+
         # Run training loop for trial
         try:
             best_val = run_training(trial_config)
-            
+
             trial_result = {
                 "trial": idx + 1,
                 "best_val_score": best_val,
@@ -186,7 +193,7 @@ def main():
             }
             for path, val in zip(paths, combo):
                 trial_result['.'.join(path)] = val
-                
+
             results.append(trial_result)
         except Exception as e:
             print(f"Trial {idx+1} failed with error: {e}")
@@ -198,7 +205,14 @@ def main():
             for path, val in zip(paths, combo):
                 trial_result['.'.join(path)] = val
             results.append(trial_result)
-            
+        finally:
+            # Release this trial's cached (but unused) CUDA memory back to
+            # the allocator pool before the next trial builds a new model —
+            # otherwise a long sweep can fragment GPU memory over many trials.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
     # Save search summary CSV
     df = pd.DataFrame(results)
     csv_path = os.path.join(output_dir, "search_summary.csv")

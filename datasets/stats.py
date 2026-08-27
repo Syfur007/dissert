@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.config import load_config
 
 
-def compute_dataset_stats(pairs: list, split_label: str = "split") -> dict:
+def compute_dataset_stats(pairs: list, split_label: str = "split", is_multiclass: bool = False) -> dict:
     """
     Compute per-channel mean/std and per-class pixel frequency over *pairs*.
 
@@ -38,6 +38,13 @@ def compute_dataset_stats(pairs: list, split_label: str = "split") -> dict:
     ----------
     pairs       : list of (img_path, mask_path)
     split_label : label used in progress output
+    is_multiclass : if False (binary segmentation — the common case here),
+        masks are binarized at 127 before counting, so antialiased/
+        compressed source masks that aren't strictly {0, 255} (e.g.
+        ClinicDB) report a clean background/foreground split instead of
+        ~100+ spurious pseudo-classes, one per intermediate grey value. If
+        True, raw pixel values are counted as-is (each value is a real
+        class index).
 
     Returns
     -------
@@ -77,7 +84,8 @@ def compute_dataset_stats(pairs: list, split_label: str = "split") -> dict:
         n_pixels = new_n
         n_images += 1
 
-        for cls, cnt in zip(*np.unique(mask, return_counts=True)):
+        class_mask = mask if is_multiclass else (mask > 127).astype(np.uint8)
+        for cls, cnt in zip(*np.unique(class_mask, return_counts=True)):
             px_hist[int(cls)] = px_hist.get(int(cls), 0) + int(cnt)
 
         if (i + 1) % report_every == 0 or (i + 1) == total:
@@ -145,7 +153,8 @@ def main():
         file=sys.stderr,
     )
 
-    stats = compute_dataset_stats(pairs, split_label=args.split)
+    is_multiclass = config.get("model", {}).get("out_channels", 1) > 1
+    stats = compute_dataset_stats(pairs, split_label=args.split, is_multiclass=is_multiclass)
 
     fmt_mean = [round(v, 4) for v in stats["mean"]]
     fmt_std  = [round(v, 4) for v in stats["std"]]

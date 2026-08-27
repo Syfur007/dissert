@@ -102,8 +102,8 @@ def compute_dataset_metrics(preds, gts):
                 m = get_binary_metrics(p_sq, g_sq)
                 dice_list.append(m['dice'])
                 iou_list.append(m['iou'])
-                if m['hd95'] < 999.0: hd95_list.append(m['hd95'])
-                if m['asd']  < 999.0: asd_list.append(m['asd'])
+                hd95_list.append(m['hd95'])
+                asd_list.append(m['asd'])
             else:
                 # ── multiclass (C, H, W) ──────────────────────────────────
                 is_multiclass = True
@@ -112,30 +112,26 @@ def compute_dataset_metrics(preds, gts):
                     m = get_binary_metrics(p[c], g[c])
                     class_dices.append(m['dice'])
                     class_ious.append(m['iou'])
-                    valid_hd95 = m['hd95'] if m['hd95'] < 999.0 else None
-                    valid_asd  = m['asd']  if m['asd']  < 999.0 else None
-                    if valid_hd95 is not None: class_hd95.append(valid_hd95)
-                    if valid_asd  is not None: class_asds.append(valid_asd)
+                    class_hd95.append(m['hd95'])
+                    class_asds.append(m['asd'])
 
                     # Accumulate per-class
                     per_class_dice.setdefault(c, []).append(m['dice'])
                     per_class_iou.setdefault(c, []).append(m['iou'])
-                    if valid_hd95 is not None:
-                        per_class_hd95.setdefault(c, []).append(valid_hd95)
-                    if valid_asd is not None:
-                        per_class_asd.setdefault(c, []).append(valid_asd)
+                    per_class_hd95.setdefault(c, []).append(m['hd95'])
+                    per_class_asd.setdefault(c, []).append(m['asd'])
 
                 dice_list.append(np.mean(class_dices))
                 iou_list.append(np.mean(class_ious))
-                if class_hd95: hd95_list.append(np.mean(class_hd95))
-                if class_asds: asd_list.append(np.mean(class_asds))
+                hd95_list.append(np.mean(class_hd95))
+                asd_list.append(np.mean(class_asds))
         else:
             # ── flat binary (H, W) ────────────────────────────────────────
             m = get_binary_metrics(p, g)
             dice_list.append(m['dice'])
             iou_list.append(m['iou'])
-            if m['hd95'] < 999.0: hd95_list.append(m['hd95'])
-            if m['asd']  < 999.0: asd_list.append(m['asd'])
+            hd95_list.append(m['hd95'])
+            asd_list.append(m['asd'])
 
     # Build per-class summary (only non-empty for multiclass runs)
     per_class: dict = {}

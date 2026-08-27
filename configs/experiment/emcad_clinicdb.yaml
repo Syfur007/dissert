@@ -1,9 +1,12 @@
-﻿# Configuration settings for Deep Learning Segmentation Pipeline
+# EMCAD on ClinicDB — overrides on top of base_config.yaml.
+# See base_config.yaml for every inherited default (early stopping, EMA,
+# augmentation, checkpointing, etc.) — only the values that differ from it
+# are listed here.
+compose: ["base_config.yaml"]
 
 model:
-  name: "emcad"             # "unet", "emcad", or "mk_unet"
-  out_channels: 1          # 1 for binary segmentation, >1 for multi-class
-  kernel_sizes: [1, 3, 5]       # MKDC kernel sizes 
+  name: "emcad"
+  kernel_sizes: [1, 3, 5]       # MKDC kernel sizes
   expansion_factor: 2
   dw_parallel: True
   add: True
@@ -13,51 +16,10 @@ model:
   pretrain: True
   pretrained_dir: './pretrained_pth/pvt/'
 
-
-dataset:
-  name: "ClinicDB"
-  root: "data/polyp/ClinicDB"
-
-  # Optional: override the list files used for each split (defaults are inside root/)
-  # train_list: "data/polyp/ClinicDB/train_list_clinicdb.txt"
-  # val_list:   "data/polyp/ClinicDB/val_list_clinicdb.txt"
-  # test_list:  "data/polyp/ClinicDB/test_list_clinicdb.txt"
-
-  img_height: 256
-  img_width: 256
-  batch_size: 8
-  num_workers: 4
-
 training:
-  epochs: 200
-  lr: 0.001
-  optimizer: "adamw"       # "adam", "adamw", "sgd"
-  weight_decay: 0.0001
-  momentum: 0.9            # for SGD
-  scheduler: "cosine"      # "cosine", "step", "none"
-  lr_step_size: 10         
-  lr_gamma: 0.5            
-  warmup_epochs: 5         # learning rate warmup
-  loss_type: "combo"       # "bce", "dice", "combo" (BCE + Dice)
-  device: "cuda"           # "cuda" or "cpu"
-  seed: 42
-  amp: true            # default: false
-  grad_clip_norm: 0.5  # default: null (disabled)
-
-k_fold:
-  enabled: true           # Set to true to run K-Fold cross validation
-  n_splits: 5              # Number of folds
-  run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
-
-checkpoint:
-  save_dir: "checkpoints"
-  resume: true
-  checkpoint_path: ""      # Path to load checkpoint for resume or eval
-  monitor_metric: "val_dice" # Metric to monitor for best model ("val_dice", "val_miou", "val_loss")
-  mode: "max"              # "max" or "min"
+  loss_type: "combo"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
+  grad_clip_mode: "norm"   # EMCAD recipe clips by norm, not by value
+  grad_clip_norm: 0.5
 
 logging:
-  log_dir: "logs"
-  tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "emcad_clinicdb"
-  log_interval: 10         # Print/log training progress every N batches
