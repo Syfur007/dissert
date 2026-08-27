@@ -103,7 +103,7 @@ def _save_best_config(base_config, paths, best_trial_row, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Hyperparameter Search Runner")
-    parser.add_argument("--base-config", type=str, default="configs/base_config.yaml", help="Path to base configuration file")
+    parser.add_argument("--base-config", type=str, default="configs/experiment/mkunet/mkunet_t_clinicdb.yaml", help="Path to base configuration file")
     parser.add_argument("--search-config", type=str, default="configs/search_config.yaml", help="Path to search configuration file")
     args = parser.parse_args()
     

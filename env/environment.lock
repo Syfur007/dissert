@@ -1,0 +1,105 @@
+# Full resolved dependency closure for the `thesis` conda env (Python 3.8.20),
+# generated via `pip freeze` after `pip install -r requirements.txt` against
+# torch==1.13.1 (Phase 0). This is the CPU-wheel resolution — a CUDA machine
+# will additionally carry NVIDIA runtime packages (nvidia-cublas-cu*, etc.)
+# pulled in by the CUDA build of torch/torchvision; those aren't listed here
+# since this lock was generated on a CPU-only host. Regenerate with
+# `pip freeze` on the target machine after installing from requirements.txt
+# to capture the exact CUDA-specific closure.
+#
+# mamba-ssm==1.0.1 / causal-conv1d==1.1.1 are pinned in requirements.txt but
+# NOT captured below: this lock was generated on a host with no CUDA toolkit
+# (no nvcc), so both fail to build here (see requirements.txt's comment block
+# for the prebuilt-wheel URLs to use on the actual GPU training machine
+# instead of `pip install mamba-ssm causal-conv1d`).
+#
+# absl-py, protobuf, six, threadpoolctl, etc. below are transitive deps (of
+# ml_collections/tensorboardx/scikit-learn/...), not directly pinned in
+# requirements.txt — listed here for exact reproducibility.
+
+absl-py==2.3.1
+albumentations==1.1.0
+annotated-types==0.7.0
+captum==0.7.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+contextlib2==21.6.0
+contourpy==1.1.1
+cycler==0.12.1
+einops==0.8.1
+filelock==3.16.1
+fonttools==4.57.0
+fvcore==0.1.5.post20221221
+h5py==3.11.0
+huggingface-hub==0.11.0
+idna==3.15
+imageio==2.35.1
+importlib_resources==6.4.5
+iopath==0.1.10
+joblib==1.4.2
+kiwisolver==1.4.7
+lazy_loader==0.4
+lightning-utilities==0.11.9
+loguru==0.7.3
+matplotlib==3.7.5
+MedPy==0.4.0
+ml_collections==0.1.1
+networkx==3.1
+nibabel==5.2.1
+numpy==1.22.4
+opencv-python==5.0.0.93
+opencv-python-headless==5.0.0.93
+packaging==26.2
+pandas==2.0.3
+patsy==1.0.2
+pillow==10.4.0
+platformdirs==4.3.6
+portalocker==3.0.0
+protobuf==5.29.6
+ptflops==0.7.3
+pydantic==2.10.6
+pydantic_core==2.27.2
+pyparsing==3.1.4
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+PyWavelets==1.4.1
+PyYAML==6.0.3
+qudida==0.0.4
+regex==2024.11.6
+requests==2.32.4
+scikit-image==0.21.0
+scikit-learn==1.3.2
+scipy==1.10.1
+seaborn==0.13.2
+segmentation-mask-overlay==0.3.4
+SimpleITK==2.4.1
+six==1.17.0
+statsmodels==0.14.1
+tabulate==0.9.0
+tensorboardX==2.6.2.2
+termcolor==2.4.0
+thop==0.1.1.post2209072238
+threadpoolctl==3.5.0
+tifffile==2023.7.10
+timm==0.6.12
+tokenizers==0.12.1
+tomli==2.4.1
+torch==1.13.1+cpu
+torchinfo==1.8.0
+torchmetrics==1.5.2
+torchprofile==0.0.4
+torchsummary==1.5.1
+torchsummaryX==1.3.0
+torchvision==0.14.1+cpu
+tqdm==4.70.0
+transformers==4.21.3
+typing_extensions==4.13.2
+tzdata==2026.3
+urllib3==2.2.3
+warmup_scheduler==0.3
+yacs==0.1.8
+zipp==3.20.2
+
+# --- GPU-only, not installable/verifiable on this host (see note above) ---
+mamba-ssm==1.0.1
+causal-conv1d==1.1.1

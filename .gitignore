@@ -3,7 +3,8 @@
 /checkpoints
 /logs
 /search_test_results
-/env
+/env/*
+!/env/environment.lock
 /runs
 /pretrained_pth
 __pycache__/

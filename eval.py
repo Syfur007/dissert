@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from models import get_model
 from datasets import StandardSplitDataModule
+from training.determinism import reset_recorded_nondeterminism, seed_everything
 from utils.config import load_config
 from utils import (
     setup_logger,
@@ -130,7 +131,7 @@ def evaluate(model, dataloader, device, is_multiclass=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate PyTorch Segmentation Model")
-    parser.add_argument("--config",      type=str, default="configs/base_config.yaml")
+    parser.add_argument("--config",      type=str, default="configs/experiment/mkunet/mkunet_t_clinicdb.yaml")
     parser.add_argument("--checkpoint",  type=str, default=None)
     parser.add_argument("--fold",        type=int, default=None)
     parser.add_argument("--ensemble",    action="store_true")
@@ -151,6 +152,8 @@ def main():
     log_cfg      = config.get('logging', {})
 
     device = torch.device(training_cfg['device'] if torch.cuda.is_available() else "cpu")
+    reset_recorded_nondeterminism()
+    seed_everything(training_cfg["seed"])
 
     # ── Logging ────────────────────────────────────────────────────────
     base_exp     = log_cfg['experiment_name']

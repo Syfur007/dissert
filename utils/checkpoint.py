@@ -1,6 +1,10 @@
 import os
+from typing import Optional
+
 import torch
 from loguru import logger
+
+from orchestration.manifest import git_commit
 
 
 def atomic_torch_save(state: dict, path: str) -> None:
@@ -24,12 +28,22 @@ class CheckpointManager:
     write always winning and silently discarding the callback's richer
     per-epoch metrics payload.
     """
-    def __init__(self, save_dir, monitor_metric="val_dice", mode="max", min_delta: float = 0.0):
+    def __init__(
+        self,
+        save_dir,
+        monitor_metric="val_dice",
+        mode="max",
+        min_delta: float = 0.0,
+        config_hash: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ):
         self.save_dir       = save_dir
         self.monitor_metric = monitor_metric
         self.mode           = mode
         self.min_delta      = min_delta
         self.best_metric    = float('-inf') if mode == "max" else float('inf')
+        self.config_hash    = config_hash
+        self.run_id         = run_id
         os.makedirs(save_dir, exist_ok=True)
 
     def is_better(self, current_val):
@@ -49,7 +63,14 @@ class CheckpointManager:
             'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
             'metric_val': metric_val,
             'monitor_metric': self.monitor_metric,
-            'fold': fold
+            'fold': fold,
+            # Provenance (Phase 1): which config produced this checkpoint,
+            # under which run_id, and at which commit — None when the caller
+            # didn't supply run_id/config_hash (pre-Phase-1 call sites, or
+            # ad hoc scripts) rather than a misleading guessed value.
+            'config_hash': self.config_hash,
+            'run_id': self.run_id,
+            'git_commit': git_commit(),
         }
 
         # persist GradScaler state so a resumed AMP run

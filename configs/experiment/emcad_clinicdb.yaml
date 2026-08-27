@@ -1,8 +1,8 @@
-# EMCAD on ClinicDB — overrides on top of base_config.yaml.
-# See base_config.yaml for every inherited default (early stopping, EMA,
-# augmentation, checkpointing, etc.) — only the values that differ from it
-# are listed here.
-compose: ["base_config.yaml"]
+# EMCAD on ClinicDB — composes the shared base config, the ClinicDB dataset
+# identity, and the EMCAD training recipe (norm-based grad clipping, combo
+# loss). See ../base.yaml for every other inherited default (early stopping,
+# EMA, augmentation, checkpointing).
+compose: ["../base.yaml", "../dataset/clinicdb.yaml", "../training/emcad.yaml"]
 
 model:
   name: "emcad"
@@ -15,11 +15,6 @@ model:
   encoder: 'pvt_v2_b2'
   pretrain: True
   pretrained_dir: './pretrained_pth/pvt/'
-
-training:
-  loss_type: "combo"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
-  grad_clip_mode: "norm"   # EMCAD recipe clips by norm, not by value
-  grad_clip_norm: 0.5
 
 logging:
   experiment_name: "emcad_clinicdb"

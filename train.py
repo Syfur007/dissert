@@ -22,6 +22,7 @@ live in the training/ package.  This file has no training logic.
 import argparse
 import os
 import random
+from typing import Optional
 
 import numpy as np
 import torch
@@ -36,6 +37,8 @@ from training.callbacks import (
     TensorBoardCallback,
     TrainingCurvePlotCallback,
 )
+from orchestration.runid import config_hash, run_id as compute_run_id
+from training.determinism import reset_recorded_nondeterminism, seed_everything
 from training.losses import get_loss
 from training.optimizers import build_optimizer, build_scheduler
 from utils import (
@@ -48,25 +51,19 @@ from utils import (
 
 
 # ---------------------------------------------------------------------------
-# Seeding
-# ---------------------------------------------------------------------------
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-# ---------------------------------------------------------------------------
 # Per-fold training run
 # ---------------------------------------------------------------------------
 
-def run_training(config: dict, fold=None) -> float:
+def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float:
     """Build all components and run Trainer.fit() for one fold (or non-CV run).
+
+    Args:
+        run_id: identifies this run for checkpoint provenance (embedded into
+            every saved checkpoint alongside the config hash and current git
+            commit — see utils.checkpoint.CheckpointManager.save). Computed
+            from the config + seed + fold when not supplied, so a bare
+            ``python train.py`` still produces addressable checkpoints, not
+            just runs launched through orchestration.runner.
 
     Returns:
         Best monitored metric value.
@@ -79,7 +76,14 @@ def run_training(config: dict, fold=None) -> float:
     es_cfg       = config.get("early_stopping", {})
 
     device = torch.device(training_cfg["device"] if torch.cuda.is_available() else "cpu")
-    set_seed(training_cfg["seed"])
+    reset_recorded_nondeterminism()
+    seed_everything(training_cfg["seed"])
+
+    # ── Run identity ───────────────────────────────────────────────────
+    resolved_config_hash = config_hash(config)
+    resolved_run_id = run_id or compute_run_id(
+        resolved_config_hash, seed=training_cfg["seed"], fold=fold
+    )
 
     # ── Logging ────────────────────────────────────────────────────────
     base_exp        = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
@@ -154,6 +158,8 @@ def run_training(config: dict, fold=None) -> float:
         monitor_metric  = chk_cfg.get("monitor_metric", "val_dice"),
         mode            = chk_cfg.get("mode", "max"),
         min_delta       = es_cfg.get("min_delta", 0.0),
+        config_hash     = resolved_config_hash,
+        run_id          = resolved_run_id,
     )
 
     es_mode      = chk_cfg.get("mode", "max")
@@ -317,7 +323,7 @@ def run_training(config: dict, fold=None) -> float:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train PyTorch Segmentation Pipeline")
-    parser.add_argument("--config",          type=str,   default="configs/base_config.yaml")
+    parser.add_argument("--config",          type=str,   default="configs/experiment/mkunet/mkunet_t_clinicdb.yaml")
     parser.add_argument("--fold",            type=int,   default=None,
                         help="Specific K-Fold index to train (0-indexed)")
     parser.add_argument("--resume",          action="store_true")

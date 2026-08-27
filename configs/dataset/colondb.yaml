@@ -1,0 +1,7 @@
+# CVC-ColonDB dataset identity fragment. Compose this into an experiment
+# config to select ColonDB — do not duplicate name/root inline; that's how
+# an experiment can silently drift onto the wrong dataset (see ColonDB fix
+# in CHANGELOG.md's Phase 1 entry).
+dataset:
+  name: "ColonDB"
+  root: "data/polyp/ColonDB"

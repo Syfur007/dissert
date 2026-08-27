@@ -1,10 +1,11 @@
 # PyTorch: pinned to match the versions this project is developed/tested against.
 # The plain PyPI wheels below are CPU-only; for a CUDA build, install from
-# https://download.pytorch.org/whl/cu113 instead (e.g.
-# `pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 --extra-index-url https://download.pytorch.org/whl/cu113`)
-# before running `pip install -r requirements.txt`.
-torch==1.11.0
-torchvision==0.12.0
+# https://download.pytorch.org/whl/cu117 instead (e.g.
+# `pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117`)
+# before running `pip install -r requirements.txt`. (cu116 wheels also exist for torch 1.13.1
+# if your driver predates CUDA 11.7 — check `nvidia-smi` before picking one.)
+torch==1.13.1
+torchvision==0.14.1
 
 # Numeric stack pinned together (not just numpy) — these are the exact
 # versions this project is developed/tested against. scipy/scikit-learn/
@@ -46,3 +47,52 @@ huggingface-hub==0.11.0
 ml_collections
 tensorboardx
 medpy
+
+# --- Framework-spec additions (Technical_Framework_Spec.md compliance) ---
+
+# Phase 1: test suite (tests/) + config schema validation.
+pytest>=8
+
+# Phase 1: config schema validation.
+pydantic>=2,<3
+
+# Phase 2: metrics/aggregate.py's write_per_image_parquet() (pandas.DataFrame.to_parquet
+# needs a parquet engine; pandas itself doesn't bundle one). Pinned to 17.0.0 — the last
+# release with a Python 3.8 wheel (18.0.0+ dropped 3.8); bump alongside a future Python bump.
+pyarrow==17.0.0
+
+# Phase 9: paired statistical tests / effect sizes.
+statsmodels
+
+# Phase 10: FLOPs/params profiling (used alongside the existing
+# torchprofile/ptflops/thop — fvcore's counter is what Phase 10's analytic
+# selective-scan counter hooks into).
+fvcore
+
+# Phase 11: attribution/explainability (occlusion, integrated gradients).
+captum
+
+# Phase 6: Mamba/VSS hybrid model family — real (kernel-accelerated)
+# selective-scan implementation. These are CUDA extensions with NO prebuilt
+# wheels on PyPI (PyPI only carries the sdist, which needs nvcc + a matching
+# CUDA toolkit to build); prebuilt wheels are published as GitHub Release
+# assets instead, keyed by CUDA/torch/python/cxx11-ABI, e.g. for CUDA 11.8 +
+# torch 1.13 + Python 3.8:
+#   https://github.com/state-spaces/mamba/releases/download/v1.0.1/mamba_ssm-1.0.1+cu118torch1.13cxx11abiFALSE-cp38-cp38-linux_x86_64.whl
+#   https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.1.1/causal_conv1d-1.1.1+cu118torch1.13cxx11abiFALSE-cp38-cp38-linux_x86_64.whl
+# Pinned to the earliest release line that lists torch==1.13 in its wheel
+# matrix (mamba-ssm 1.0.1 is in fact the *first* PyPI release and already
+# covers torch 1.12/1.13; causal-conv1d 1.1.1 is the earliest of its releases
+# confirmed here to carry a torch1.13/cp38 wheel) — later releases of both
+# (mamba-ssm >=1.5 requires Python >=3.9; both eventually drop torch<2.0
+# entirely from their wheel matrix) assume torch>=2.0. Match `cxx11abiTRUE`
+# vs `cxx11abiFALSE` to `torch._C._GLIBCXX_USE_CXX11_ABI` on the target
+# machine, and cu118/cu116 to its driver's supported CUDA version — download
+# the matching wheel manually and `pip install <wheel file>` rather than
+# `pip install mamba-ssm`, which will otherwise try (and typically fail
+# without nvcc + the full CUDA toolkit) to build both packages from source.
+# If no matching prebuilt wheel exists for the deployment GPU/CUDA/Python
+# combination, skip both and use models/auxiliary/ss2d_ref.py's pure-PyTorch
+# fallback (Phase 6) instead of blocking on a source build.
+mamba-ssm==1.0.1
+causal-conv1d==1.1.1

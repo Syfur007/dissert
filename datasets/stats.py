@@ -8,11 +8,13 @@ into dataset configs.
 
 Usage
 -----
-    # Compute stats on the train split (default):
-    python -m datasets.stats --config configs/base_config.yaml
+    # Compute stats on the train split (default) — pass any experiment
+    # config that composes the dataset you want stats for (only its
+    # `dataset:` section is read):
+    python -m datasets.stats --config configs/experiment/mkunet/mkunet_t_clinicdb.yaml
 
     # Include val + test in the computation:
-    python -m datasets.stats --config configs/base_config.yaml --split all
+    python -m datasets.stats --config configs/experiment/mkunet/mkunet_t_clinicdb.yaml --split all
 """
 import argparse
 import sys

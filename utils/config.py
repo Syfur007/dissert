@@ -61,6 +61,26 @@ def _load_config_file(config_path: Path, stack: tuple[Path, ...]) -> dict[str, A
     return _merge_dicts(composed, raw_config)
 
 
-def load_config(config_path: str | Path) -> dict[str, Any]:
-    """Load a YAML config and recursively compose any referenced fragments."""
-    return _load_config_file(Path(config_path).expanduser().resolve(), ())
+def load_config(config_path: str | Path, validate: bool = True) -> dict[str, Any]:
+    """Load a YAML config, recursively composing any referenced fragments.
+
+    The merged dict is piped through ``orchestration.schema.validate_config``
+    before being returned: an unknown key, a missing required key, or a
+    value of the wrong type anywhere in the config tree raises
+    ``pydantic.ValidationError`` here rather than surfacing later as a
+    confusing ``KeyError``/``TypeError`` deep in train.py/eval.py, or not at
+    all (a typo'd key that's simply never read). Pass ``validate=False`` to
+    get the raw merged dict back for a config fragment that is not itself a
+    complete, standalone experiment or search-sweep config (e.g. one of the
+    configs/dataset|model|training/*.yaml fragments loaded in isolation,
+    rather than composed).
+
+    Import is local to avoid a hard import-time dependency from every
+    load_config() caller (including this module's own doctests / any
+    standalone fragment tooling) on pydantic being installed.
+    """
+    merged = _load_config_file(Path(config_path).expanduser().resolve(), ())
+    if not validate:
+        return merged
+    from orchestration.schema import validate_config
+    return validate_config(merged)

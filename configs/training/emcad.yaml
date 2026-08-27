@@ -1,0 +1,4 @@
+training:
+  loss_type: "combo"       # "bce" | "dice" | "structure" | "combo" | "adaptive_guide_fusion"
+  grad_clip_mode: "norm"   # EMCAD recipe clips by norm, not by value
+  grad_clip_norm: 0.5

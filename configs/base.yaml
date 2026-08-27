@@ -7,8 +7,15 @@ model:
   features: [64, 128, 256, 512]
 
 dataset:
-  name: "ClinicDB"
-  root: "data/polyp/ClinicDB"
+  # name/root are deliberately NOT defaulted here — every experiment config
+  # must compose a configs/dataset/<name>.yaml fragment (or set both
+  # explicitly) to select a dataset. A prior version of this file defaulted
+  # to ClinicDB, which let an experiment silently train on the wrong dataset
+  # if it forgot to override dataset.name/root (see CHANGELOG.md's Phase 1
+  # entry — this is exactly how mkunet_s_colondb.yaml quietly trained on
+  # ClinicDB for however long). The schema in orchestration/schema.py now
+  # requires both fields, so a config missing them fails to load instead of
+  # silently picking a dataset.
 
   # Optional: override the list files used for each split (defaults are inside root/)
   # train_list: "data/polyp/ClinicDB/train_list_clinicdb.txt"

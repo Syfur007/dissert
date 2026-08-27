@@ -1,15 +1,9 @@
-# MK-UNet (small) on ClinicDB — overrides on top of base_config.yaml.
-# See ../../base_config.yaml for every inherited default (early stopping,
-# EMA, augmentation, checkpointing, etc.).
-compose: ["../../base_config.yaml"]
-
-model:
-  name: "mk_unet_s"
-  channels: [8, 16, 32, 48, 80]
-  depths: [1, 1, 1, 1, 1]        # MKIR depth at each stage
-  kernel_sizes: [1, 3, 5]        # MKDC kernel sizes
-  expansion_factor: 2
-  gag_kernel: 3
+# MK-UNet (small) on ClinicDB — composes the shared base config, the
+# ClinicDB dataset identity, and the small model-size fragment; only
+# per-experiment overrides (batch size, run name) are listed here. See
+# ../../base.yaml for every inherited default (early stopping, EMA,
+# augmentation, checkpointing).
+compose: ["../../base.yaml", "../../dataset/clinicdb.yaml", "../../model/mkunet/s.yaml"]
 
 dataset:
   batch_size: 16
