@@ -113,6 +113,28 @@ class DatasetConfig(_Strict):
     cache: bool = False
     cache_size_limit_gb: float = 4.0
 
+    # Only meaningful for an unregistered (generic auto-split) dataset — see
+    # datasets/datamodule.py's _GenericHandler. Marks it held-out-evaluation-
+    # only: get_dataset("train")/get_dataset("val") raise rather than
+    # silently returning an empty loader.
+    external: bool = False
+
+    # BUSI-specific (datasets/busi.py): run preprocess.dedup() before
+    # splitting. Mandatory per spec — only meaningful to set False when
+    # re-running against data you've already deduplicated. Ignored by
+    # every other handler.
+    dedup: bool = True
+
+    # ISIC18-specific (datasets/isic18.py): override the official
+    # directory names when a download's layout doesn't match them exactly.
+    # Ignored by every other handler.
+    train_img_dir: Optional[str] = None
+    train_mask_dir: Optional[str] = None
+    val_img_dir: Optional[str] = None
+    val_mask_dir: Optional[str] = None
+    test_img_dir: Optional[str] = None
+    test_mask_dir: Optional[str] = None
+
     split: Optional[SplitRatios] = None
 
     augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)

@@ -215,7 +215,7 @@ class PredictionOverlayCallback(Callback):
         if self._prefetched:
             return
         try:
-            images, masks = next(iter(self.val_loader))
+            images, masks, _meta = next(iter(self.val_loader))
             n = min(self.n_samples, images.shape[0])
             self._sample_images = images[:n]
             self._sample_masks  = masks[:n]

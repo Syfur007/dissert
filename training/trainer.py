@@ -28,7 +28,8 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
-from utils import CheckpointManager, EarlyStopping, compute_dataset_metrics, atomic_torch_save
+from metrics import compute_dataset_metrics
+from utils import CheckpointManager, EarlyStopping, atomic_torch_save
 from training.callbacks import Callback
 from training.ema import EMA
 from training.optimizers import build_optimizer, build_scheduler
@@ -329,6 +330,17 @@ class Trainer:
         - Batch-level callbacks (``on_batch_end``)
         - Rolling Dice/IoU computed from raw logits (no medpy required)
 
+        The rolling Dice/IoU is a cheap live-monitoring proxy only — a
+        clamp(min=1e-6)-denominator tensor computation averaged across
+        batches from a model that's still changing weight-by-weight through
+        the epoch, not metrics.aggregate.compute_dataset_metrics' fixed-
+        model, empty-mask-aware, medpy-backed computation that validate()
+        (below) and eval.py both use. **Never cite train_dice/train_iou in
+        a results table** — they exist for the progress bar and TensorBoard
+        only. tests/test_metrics.py::test_rolling_tracks_canonical_at_epoch_end
+        only asserts the two stay in the same ballpark, not that they match;
+        they are not interchangeable.
+
         Returns:
             Tuple of (mean_train_loss, mean_train_dice, mean_train_iou).
         """
@@ -352,7 +364,7 @@ class Trainer:
 
         pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader),
                     desc=f"Epoch {epoch} [Train]")
-        for batch_idx, (images, masks) in pbar:
+        for batch_idx, (images, masks, _meta) in pbar:
             images_full = images.to(self.device)
             masks_full  = masks.to(self.device)
             h, w        = images_full.shape[2], images_full.shape[3]
@@ -489,7 +501,7 @@ class Trainer:
         gts_list:   list = []
 
         with torch.no_grad():
-            for images, masks in tqdm(self.val_loader, desc="Validating"):
+            for images, masks, _meta in tqdm(self.val_loader, desc="Validating"):
                 images = images.to(self.device)
                 masks  = masks.to(self.device)
 

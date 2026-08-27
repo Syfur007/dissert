@@ -116,3 +116,147 @@ on the actual training machine before treating Phase 0 as fully closed there.
   fake and the real `train.run_training`, including idempotent re-run skipping; `search.py` still
   completes a full grid sweep (summary CSV, best-config YAML, markdown report) with per-trial
   failure isolation intact.
+
+## Phase 2 — Canonical metrics module (2026-08-28)
+
+- **New top-level `metrics/` package**, collapsing the three independently-drifted Dice/IoU/HD95/
+  ASD implementations (`utils/metrics.py`'s `get_binary_metrics`/`compute_dataset_metrics`,
+  `utils/report.py`'s `compute_extended_metrics`, and `training/trainer.py`'s per-batch rolling
+  proxy) down to two: this package (canonical) and the rolling proxy (deliberately kept separate,
+  see below). `region.py` (dice/iou — empty-mask convention ported unchanged: both-empty → 1.0),
+  `boundary.py` (hd95/asd/nsd — **behaviour change**: exactly-one-empty is now `None`/excluded +
+  counted, replacing the old ad hoc `999.0` penalty that silently distorted any mean/percentile by
+  however many empty-vs-nonempty pairs happened to land in a given eval; both-empty stays 0.0/1.0),
+  `detection.py` (precision/recall/specificity/F2/accuracy — ported from `utils/report.py`
+  unchanged, including its zero-denominator→0.0 convention; **note this doesn't match region.py's
+  both-empty→1.0 convention** — pre-existing inconsistency, not introduced here, left as-is since
+  Phase 2's scope was consolidation + the one documented HD95/ASD/NSD change, not a second
+  unscoped convention change; adds `fpr_on_normals`/`specificity_on_lesion_free_subset`, both
+  `None` — not 0.0 — when a dataset has no lesion-free images, which is true of ClinicDB/ColonDB),
+  `calibration.py` (ECE, equal-mass binning — new, no prior implementation existed),
+  `aggregate.py` (`EMPTY_MASK_CONVENTION` constant documenting every convention above in one place,
+  `compute_dataset_metrics()`, `dice_p5`/`dice_p25`, `write_per_image_parquet()`).
+- `utils/metrics.py` shrunk to just `count_parameters`/`measure_throughput`/`log_model_summary`
+  (Phase 10's territory, not moved) — `get_binary_metrics`/`compute_dataset_metrics` deleted, not
+  deprecated-and-reexported, since every call site was migrated in this same session rather than
+  across a longer rollout. `utils/report.py`'s `compute_extended_metrics` deleted outright; its
+  `EvaluationReporter.set_eval_results()` no longer takes `preds`/`gts` (no longer needed — the
+  canonical `base_metrics` dict already carries precision/recall/specificity/f2/accuracy) and its
+  "(N/A — multiclass)" table note is gone, since the new implementation computes those correctly
+  for multiclass too (a genuine improvement: the old per-image TP/FP/FN/TN on a raw multiclass
+  label map would have collapsed classes together, so it was skipped entirely before; the new
+  version does a proper per-class one-vs-rest decomposition instead).
+  `eval.py`/`training/trainer.py` now `from metrics import compute_dataset_metrics` directly
+  instead of via `utils`'s re-export.
+- Added `pyarrow==17.0.0` to `requirements.txt` for `write_per_image_parquet()` — the last release
+  with a Python 3.8 wheel (18.0.0+ dropped 3.8; bump alongside a future Python bump).
+- `training/trainer.py`'s rolling per-batch Dice/IoU (`train_one_epoch`, computed from raw logits,
+  no medpy) is **unchanged** per the plan — it's a deliberately separate, cheap tensor-native
+  computation for the progress bar/TensorBoard, not a second canonical implementation. Its
+  docstring now says explicitly: never cite `train_dice`/`train_iou` in a results table.
+  `validate()`'s metrics (the ones actually logged/checkpointed as `val_dice` etc.) already called
+  the canonical function before this phase and still do, now pointed at the new package.
+- **New `tests/test_metrics.py`** (7 tests): `test_metric_conventions` (every empty-mask rule in
+  `EMPTY_MASK_CONVENTION`, checked against real function calls, not just read from the constant),
+  exclusion-counting, the lesion-free-subset aggregates, an ECE sanity check, a Parquet
+  round-trip, and `test_rolling_tracks_canonical_at_epoch_end` — builds a real `Trainer`, calls
+  `train_one_epoch()` directly to capture the actual rolling `(dice, iou)` return value, then
+  independently re-evaluates the same post-epoch weights on the same training data via the
+  canonical path and asserts they land in the same ballpark (measured drift on the synthetic
+  fixture: ~0.017; asserted tolerance: 0.35, generous on purpose to avoid flakiness while still
+  catching a real convention-divergence bug). 23/23 tests passing repo-wide.
+- Verified end-to-end against the real pipeline: `eval.py` on `gmkunet_t_clinicdb` still reproduces
+  the exact baseline (Dice 0.7816, mIoU 0.6881, ..., all bit-identical to Phase 0/1) and its JSON
+  report now carries `nsd`, `dice_p5`/`dice_p25`, `hd95_excluded_n`/`asd_excluded_n`, `ece`, and
+  `fpr_on_normals`/`specificity_lesion_free` (`None` for ClinicDB, confirming the "no lesion-free
+  images" case is detected correctly rather than silently reporting 0.0/1.0); a real multi-epoch
+  `train.py` run confirms the canonical validation path (now backed by `metrics/`) still trains,
+  checkpoints, and logs `val_dice`/`val_miou`/`val_hd95`/`val_asd` correctly.
+
+## Phase 3 — Data-layer retrofit: (image, mask, meta) contract, leakage guards, BUSI/ISIC18 (2026-08-28)
+
+- **`Dataset.__getitem__` now returns `(image, mask, meta)`** instead of `(image, mask)` —
+  `meta = {subject_id, source_dataset, spacing, artefact_flags}`, applied project-wide (ClinicDB/
+  ColonDB included, not just new datasets — a leakage guard is meaningless otherwise).
+  `spacing` is `()`, not `None`, for "no spacing metadata" — confirmed torch 1.13's default
+  `DataLoader` collate raises on a bare `None` inside a dict value but happily collates an empty
+  sequence into `[]`. Single coordinated change across every consumer in one pass: found via a
+  full-repo unpacking-pattern search, **5 call sites across 4 files**, not the ~4 named in the
+  plan — `training/trainer.py` (`train_one_epoch`, `_validate_model`), `eval.py` (`evaluate`),
+  `training/callbacks.py` (`PredictionOverlayCallback`), and **`utils/metrics.py`'s
+  `measure_throughput`** (missed by an initial grep since it unpacks `(images, _)`, not
+  `(images, masks)` — caught by actually running `eval.py --allow-test-eval` end-to-end afterward,
+  not just by the grep). ClinicDB/ColonDB's `subject_id` honestly defaults to frame-level identity
+  (filename stem) via each handler's new `ARTEFACT_FLAGS = {"frame_level_only_no_video_grouping":
+  True}` — the caveat that used to live only in `KFoldDataModule`'s docstring now has a
+  machine-readable home.
+- **New `datasets/splits.py`**: `assert_no_subject_overlap()` (`LeakageError`),
+  `load_published_split()` (reads + SHA1-hashes a `train_list_*.txt`-style file),
+  `duplicate_cross_check()` (exact-hash cross-split duplicate detection — closes the gap in
+  `_GenericHandler`'s unguarded random shuffle), plus `ExternalDatasetError` and
+  `TestLoaderGuardError` (see below).
+- **New `datasets/preprocess.py`**: `build_manifest()` (path/subject_id/split/`mask_empty`/
+  resolution, computed once from the raw mask file — deliberately *not* inside `__getitem__`,
+  where it would be both wasteful to recompute every epoch and ambiguous post-augmentation, since
+  a crop can move a lesion in or out of frame run to run); `dedup()` (phash + SSIM, two-stage —
+  mandatory for BUSI per spec).
+- **Test-loader guard**: `StandardSplitDataModule.get_test_loader()` and
+  `KFoldDataModule.get_test_loader()` now require a `token` argument, raising
+  `TestLoaderGuardError` unless it was minted by the new
+  `orchestration.ledger.LedgerWriter.issue_test_token()` (which appends a `Test_Evals` row as a
+  side effect — "did this run touch the test set" is now a ledger fact, not a convention).
+  `eval.py` gained `--test-token <TOKEN>` (pre-minted, e.g. from an orchestrated sweep) and
+  `--allow-test-eval` (self-mints one for a manual run). Verified all four paths against real
+  ClinicDB data: no token → refused with a clean error (not a raw traceback — added a
+  `try/except TestLoaderGuardError` around the call, since a *bogus* token bypasses the earlier
+  argparse-level check and needs its own handling); bogus token → refused; `--allow-test-eval` →
+  works, ledger row recorded; pre-minted `--test-token` → works. `orchestration.runner`,
+  `train.py`, `training/trainer.py`, and `search.py` contain zero references to `get_test_loader` —
+  verified as a repo-wide static fact (`tests/test_data_contract.py::test_sweep_cannot_see_test`),
+  so the sweep/training path structurally cannot reach the guarded test set.
+- **`_GenericHandler` gains `external: bool`** (`dataset.external` in config): when set,
+  `get_dataset("train")`/`get_dataset("val")` raise `ExternalDatasetError` instead of silently
+  returning an empty loader — every sample goes to `"test"`. Registered handlers (ClinicDB et al.)
+  don't support this; it's specifically for a held-out-only external cohort with no train/val split
+  by design. Handler construction protocol changed to always pass `seed` (`DATASETS[name](cfg,
+  seed)`, not `DATASETS[name](cfg)`) so a handler that needs to compute its own random split (BUSI)
+  can, while ones that don't (ClinicDB/ColonDB/ISIC18 — published or official splits) just accept
+  and ignore it.
+- **New `datasets/busi.py`, `datasets/isic18.py`** — same `get_dataset()`/`get_kfold_pairs()`
+  interface as ClinicDB/ColonDB, registered into `DATASETS`. **Structurally complete but UNVERIFIED
+  against real data** — no BUSI or ISIC18 files exist anywhere reachable from this environment.
+  Built against each dataset's publicly documented layout (BUSI: `benign/malignant/normal`
+  subfolders, `<case>.png` + `<case>_mask.png`, no official split — hence a seeded random split via
+  `dataset.split`, with mandatory `preprocess.dedup()`; ISIC18: the official
+  `ISIC2018_Task1-2_*_Input`/`ISIC2018_Task1_*_GroundTruth` directory triad with a
+  `<stem>_segmentation.png` mask suffix that needed its own pairing logic — the shared
+  `MedicalSegmentationDataset` filename-matching only tolerates `_mask`/`_gt`). Verified the
+  handler *interface* end-to-end against synthetic data built to match each documented layout
+  (`tests/test_data_contract.py`) — get_dataset/get_kfold_pairs/mask-pairing/dedup all confirmed
+  working structurally; **sanity-check directory names and the mask suffix against your actual
+  download before first real use.** New `configs/dataset/busi.yaml`/`isic18.yaml` fragments, same
+  "point this at real data, unverified" caveat.
+- **New `tests/test_data_contract.py`** (13 tests): the four the plan names —
+  `test_no_subject_overlap` (including a real check against ClinicDB's actual K-Fold split, not
+  just synthetic ids), `test_external_never_trained`, `test_test_loader_guard`,
+  `test_sweep_cannot_see_test` — plus contract round-trip tests (including through a real
+  `DataLoader`, where the `None`-vs-`()` collate issue above actually surfaces),
+  `duplicate_cross_check` unit tests, and the BUSI/ISIC18 handler-interface tests. 36/36 tests
+  passing repo-wide.
+- **Real finding**: ran the new `duplicate_cross_check()` against ColonDB's actual published
+  split (not just as a unit-test exercise) and it found **35 of ColonDB's 379 images (9.2%) are
+  byte-identical duplicates split across train/val/test** — 9 duplicate groups, most crossing the
+  train/test boundary specifically (confirmed genuine: matching MD5 + file size + real image
+  content, not blank/degenerate frames — e.g. `train/images/198.png` and `val/images/183.png` are
+  byte-identical). This means any model trained on ColonDB's current published split (including
+  the newly-fixed `mkunet_s_colondb` config from Phase 1) has some fraction of its "held-out" test
+  images already memorisable from training. **Not fixed here** — per user instruction, no
+  checkpoints were re-run this session, and de-duplicating a published split is a data-curation
+  decision the user should make deliberately (e.g. via `datasets.preprocess.dedup()` or
+  `datasets.splits.duplicate_cross_check()`-guided exclusion), not one this pass makes silently.
+  Ran the same check against ClinicDB: 0 cross-split duplicates found.
+- `MedicalSegmentationDataset.__init__` gained `source_dataset`/`subject_id_fn`/`artefact_flags`
+  params (all optional, default to `""`/frame-level-stem/`{}`); `KFoldDataModule.get_fold_loaders()`
+  now threads `source_dataset`/`artefact_flags` through explicitly (it constructs
+  `MedicalSegmentationDataset` directly from cached fold pairs, bypassing the handler's
+  `get_dataset()`, so couldn't inherit them the way `StandardSplitDataModule` does).

@@ -1,0 +1,16 @@
+# ISIC 2018 (Task 1-2, lesion segmentation) dataset identity fragment.
+#
+# UNVERIFIED against real data (see datasets/isic18.py's module docstring)
+# — no ISIC18 files exist in the environment this fragment was authored
+# in. Point `root` at your actual download and sanity-check a few
+# (image, mask) pairs load correctly before trusting a training run —
+# confirm in particular that your download's directory names and mask
+# filename suffix (`_segmentation.png`) actually match what
+# datasets/isic18.py expects; override via the dataset.*_img_dir /
+# dataset.*_mask_dir keys documented in that handler's docstring if not.
+#
+# Unlike BUSI, ISIC18 ships an official train/val/test split baked into
+# its directory structure — no `dataset.split` ratios needed or used here.
+dataset:
+  name: "ISIC18"
+  root: "data/isic18"

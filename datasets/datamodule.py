@@ -19,6 +19,11 @@ KFoldDataModule(BaseDataModule)
 Dataset handler registry
 ------------------------
 Add new handlers to ``DATASETS`` dict; each must implement:
+    __init__(cfg: dict, seed: int)          — seed is unused by handlers with a
+                                               published/pre-made split (ClinicDB,
+                                               ColonDB, ISIC18) but required by the
+                                               interface for handlers that compute
+                                               their own random split (BUSI)
     get_dataset(split, transform, **kwargs) → MedicalSegmentationDataset
     get_kfold_pairs()                       → list of [img_path, mask_path]
 """
@@ -37,12 +42,16 @@ from .dataset import MedicalSegmentationDataset
 from .transforms import build_transforms
 from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
+from .busi import BUSI
+from .isic18 import ISIC18
 
 _MODEL_STRIDE = 32
 
 DATASETS: dict = {
     ClinicDB.NAME: ClinicDB,
     ColonDB.NAME:  ColonDB,
+    BUSI.NAME:     BUSI,
+    ISIC18.NAME:   ISIC18,
 }
 
 
@@ -63,6 +72,23 @@ def _make_worker_init_fn(base_seed: int):
     return worker_init_fn
 
 
+def _check_test_token(token: str, ledger_dir: str) -> None:
+    """Shared guard both StandardSplitDataModule.get_test_loader() and
+    KFoldDataModule.get_test_loader() call — the whole point of Phase 3's
+    test-loader guard is that both paths enforce the identical check, not
+    two independently-maintained copies of it."""
+    from orchestration.ledger import LedgerWriter
+    from datasets.splits import TestLoaderGuardError
+
+    if not token or not LedgerWriter(ledger_dir).has_test_token(token):
+        raise TestLoaderGuardError(
+            "Invalid or missing test-evaluation token. Mint one via "
+            "orchestration.ledger.LedgerWriter.issue_test_token() before "
+            "calling get_test_loader() — see eval.py's --test-token / "
+            "--allow-test-eval flags."
+        )
+
+
 # ── Generic flat-directory handler ──────────────────────────────────────────
 
 class _GenericHandler:
@@ -70,18 +96,26 @@ class _GenericHandler:
     Handler for datasets that ship as a flat ``images/`` + ``masks/``
     directory without pre-made train/val/test sub-trees.
 
-    Requires ``dataset.split: {train: 0.8, val: 0.1, test: 0.1}`` in config.
-    Files are shuffled with the training seed for reproducibility.
+    Requires ``dataset.split: {train: 0.8, val: 0.1, test: 0.1}`` in config
+    (ignored when ``external=True`` — every sample goes to "test"). Files
+    are shuffled with the training seed for reproducibility.
+
+    Args:
+        external: marks this dataset as held-out-evaluation-only (e.g. a
+            genuinely external validation cohort). When True,
+            ``get_dataset("train")``/``get_dataset("val")`` raise
+            ``datasets.splits.ExternalDatasetError`` instead of silently
+            returning an empty-but-technically-iterable DataLoader — "no
+            train loader is returned" is enforced as a loud failure at
+            request time, not a quiet 0-length one discovered later.
     """
 
-    def __init__(self, cfg: dict, seed: int):
-        split_ratios = cfg.get("split")
-        if not split_ratios:
-            raise ValueError(
-                "Dataset not registered and 'dataset.split' is absent. "
-                "Add 'split: {train: 0.8, val: 0.1, test: 0.1}' to your config "
-                "or register a handler in datasets/datamodule.py."
-            )
+    ARTEFACT_FLAGS = {"auto_split_no_registered_handler": True}
+
+    def __init__(self, cfg: dict, seed: int, external: bool = False):
+        self.external = external
+        self.NAME = cfg.get("name", "generic")
+
         root     = cfg["root"]
         img_dir  = os.path.join(root, "images")
         mask_dir = os.path.join(root, "masks")
@@ -93,22 +127,44 @@ class _GenericHandler:
         all_names = sorted(
             f for f in os.listdir(img_dir) if os.path.isfile(os.path.join(img_dir, f))
         )
-        rng     = np.random.default_rng(seed)
-        indices = rng.permutation(len(all_names))
 
-        n       = len(all_names)
-        n_train = math.floor(split_ratios.get("train", 0.8) * n)
-        n_val   = math.floor(split_ratios.get("val",   0.1) * n)
+        if external:
+            self._splits = {"train": [], "val": [], "test": all_names}
+        else:
+            split_ratios = cfg.get("split")
+            if not split_ratios:
+                raise ValueError(
+                    "Dataset not registered and 'dataset.split' is absent. "
+                    "Add 'split: {train: 0.8, val: 0.1, test: 0.1}' to your "
+                    "config, set 'external: true' for a held-out-only "
+                    "dataset, or register a handler in datasets/datamodule.py."
+                )
+            rng     = np.random.default_rng(seed)
+            indices = rng.permutation(len(all_names))
 
-        self._splits = {
-            "train": [all_names[i] for i in indices[:n_train]],
-            "val":   [all_names[i] for i in indices[n_train : n_train + n_val]],
-            "test":  [all_names[i] for i in indices[n_train + n_val :]],
-        }
+            n       = len(all_names)
+            n_train = math.floor(split_ratios.get("train", 0.8) * n)
+            n_val   = math.floor(split_ratios.get("val",   0.1) * n)
+
+            self._splits = {
+                "train": [all_names[i] for i in indices[:n_train]],
+                "val":   [all_names[i] for i in indices[n_train : n_train + n_val]],
+                "test":  [all_names[i] for i in indices[n_train + n_val :]],
+            }
+
         self._img_dir  = img_dir
         self._mask_dir = mask_dir
 
     def get_dataset(self, split: str, transform=None, **kwargs) -> MedicalSegmentationDataset:
+        if self.external and split in ("train", "val"):
+            from datasets.splits import ExternalDatasetError
+            raise ExternalDatasetError(
+                f"Dataset '{self.NAME}' is marked external (dataset.external: "
+                f"true) — requesting a '{split}' loader for it is not allowed. "
+                "External datasets are held-out evaluation-only."
+            )
+        kwargs.setdefault("source_dataset", self.NAME)
+        kwargs.setdefault("artefact_flags", self.ARTEFACT_FLAGS)
         return MedicalSegmentationDataset(
             self._img_dir, self._mask_dir,
             filenames=self._splits[split],
@@ -206,13 +262,13 @@ class StandardSplitDataModule(BaseDataModule):
         name   = ds_cfg["name"].lower()
 
         if name in DATASETS:
-            self.handler = DATASETS[name](ds_cfg)
+            self.handler = DATASETS[name](ds_cfg, self._seed)
         else:
             logger.info(
                 f"Dataset '{name}' not in registry; "
                 "falling back to generic auto-split handler."
             )
-            self.handler = _GenericHandler(ds_cfg, self._seed)
+            self.handler = _GenericHandler(ds_cfg, self._seed, external=ds_cfg.get("external", False))
 
     def get_standard_loaders(self):
         """Return ``(train_loader, val_loader)``."""
@@ -220,8 +276,14 @@ class StandardSplitDataModule(BaseDataModule):
         val_ds   = self.handler.get_dataset("val",   self._val_tf,   **self._ds_kwargs)
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
 
-    def get_test_loader(self):
-        """Return the test DataLoader, or ``None`` if no test samples exist."""
+    def get_test_loader(self, token: str, ledger_dir: str = "artifacts/ledger"):
+        """Return the test DataLoader, or ``None`` if no test samples exist.
+
+        Raises ``datasets.splits.TestLoaderGuardError`` unless *token* was
+        minted by ``orchestration.ledger.LedgerWriter.issue_test_token()``
+        — see eval.py's ``--test-token``/``--allow-test-eval`` flags.
+        """
+        _check_test_token(token, ledger_dir)
         test_ds = self.handler.get_dataset("test", self._val_tf, **self._ds_kwargs)
         return self._make_loader(test_ds, False) if len(test_ds) > 0 else None
 
@@ -264,7 +326,7 @@ class KFoldDataModule(BaseDataModule):
                 f"K-Fold is not supported for generic auto-split datasets."
             )
 
-        self.handler = DATASETS[name](ds_cfg)
+        self.handler = DATASETS[name](ds_cfg, self._seed)
         self.kf_cfg  = config.get("k_fold", {})
 
         exp_name        = config.get("logging", {}).get("experiment_name", "experiment")
@@ -320,15 +382,29 @@ class KFoldDataModule(BaseDataModule):
                 f"fold_idx {fold_idx} out of range [0, {len(folds)})."
             )
         fold     = folds[fold_idx]
+        # get_fold_loaders builds pairs itself (from the cached fold split),
+        # bypassing self.handler.get_dataset() — so source_dataset/
+        # artefact_flags have to be threaded through here explicitly rather
+        # than relying on the handler's get_dataset() to set them.
+        meta_kwargs = dict(
+            source_dataset=getattr(self.handler, "NAME", ""),
+            artefact_flags=getattr(self.handler, "ARTEFACT_FLAGS", {}),
+        )
         train_ds = MedicalSegmentationDataset(
-            pairs=fold["train"], transform=self._train_tf, **self._ds_kwargs
+            pairs=fold["train"], transform=self._train_tf, **meta_kwargs, **self._ds_kwargs
         )
         val_ds = MedicalSegmentationDataset(
-            pairs=fold["val"], transform=self._val_tf, **self._ds_kwargs
+            pairs=fold["val"], transform=self._val_tf, **meta_kwargs, **self._ds_kwargs
         )
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
 
-    def get_test_loader(self):
-        """Return the test DataLoader, or ``None`` if no test samples exist."""
+    def get_test_loader(self, token: str, ledger_dir: str = "artifacts/ledger"):
+        """Return the test DataLoader, or ``None`` if no test samples exist.
+
+        Raises ``datasets.splits.TestLoaderGuardError`` unless *token* was
+        minted by ``orchestration.ledger.LedgerWriter.issue_test_token()``
+        — see eval.py's ``--test-token``/``--allow-test-eval`` flags.
+        """
+        _check_test_token(token, ledger_dir)
         test_ds = self.handler.get_dataset("test", self._val_tf, **self._ds_kwargs)
         return self._make_loader(test_ds, False) if len(test_ds) > 0 else None

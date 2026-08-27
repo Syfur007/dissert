@@ -75,69 +75,6 @@ def _safe_fmt(value, fmt_str=".4f", suffix="") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Extended metric computation
-# ---------------------------------------------------------------------------
-
-def compute_extended_metrics(preds: list, gts: list) -> dict:
-    """
-    Compute an extended set of segmentation metrics beyond Dice/mIoU.
-
-    Adds per-image:
-        - Precision  (Positive Predictive Value)
-        - Recall     (Sensitivity / True Positive Rate)
-        - Specificity (True Negative Rate)
-        - F2-Score   (β=2, rewards recall twice as much as precision)
-        - Accuracy   (pixel-level)
-
-    All scores are macro-averaged across the test set.
-
-    Args:
-        preds: List of np.ndarray predictions (binary or single-channel).
-        gts:   List of np.ndarray ground-truth masks (binary or single-channel).
-
-    Returns:
-        dict with keys: precision, recall, specificity, f2, accuracy.
-    """
-    prec_list, rec_list, spec_list, f2_list, acc_list = [], [], [], [], []
-
-    for p, g in zip(preds, gts):
-        # Flatten to 1-D boolean arrays
-        p_b = p.astype(bool).ravel()
-        g_b = g.astype(bool).ravel()
-
-        tp = int(np.logical_and(p_b, g_b).sum())
-        fp = int(np.logical_and(p_b, ~g_b).sum())
-        fn = int(np.logical_and(~p_b, g_b).sum())
-        tn = int(np.logical_and(~p_b, ~g_b).sum())
-
-        precision   = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall      = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-        accuracy    = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
-
-        beta2 = 4.0  # β² = 4 for F2
-        denom_f2 = beta2 * precision + recall
-        f2 = (1 + beta2) * precision * recall / denom_f2 if denom_f2 > 0 else 0.0
-
-        prec_list.append(precision)
-        rec_list.append(recall)
-        spec_list.append(specificity)
-        f2_list.append(f2)
-        acc_list.append(accuracy)
-
-    def _mean(lst):
-        return float(np.mean(lst)) if lst else 0.0
-
-    return {
-        "precision":   _mean(prec_list),
-        "recall":      _mean(rec_list),
-        "specificity": _mean(spec_list),
-        "f2":          _mean(f2_list),
-        "accuracy":    _mean(acc_list),
-    }
-
-
-# ---------------------------------------------------------------------------
 # Model introspection helpers
 # ---------------------------------------------------------------------------
 
@@ -261,7 +198,7 @@ class EvaluationReporter:
     Workflow:
         reporter = EvaluationReporter(config, args, logger)
         reporter.set_model_info(model, flops, params, throughput, checkpoint_path)
-        reporter.set_eval_results(metrics, preds, gts, num_samples, eval_duration_s)
+        reporter.set_eval_results(metrics, num_samples, eval_duration_s)
         reporter.save(report_dir)
         reporter.print_console()
     """
@@ -350,8 +287,6 @@ class EvaluationReporter:
     def set_eval_results(
         self,
         base_metrics: dict,
-        preds: list,
-        gts: list,
         num_samples: int,
         eval_duration_s: float,
         is_multiclass: bool = False,
@@ -360,31 +295,28 @@ class EvaluationReporter:
         Populate evaluation results.
 
         Args:
-            base_metrics:    Dict from compute_dataset_metrics (dice/miou/hd95/asd).
-            preds:           Raw prediction list (for extended metric computation).
-            gts:             Raw ground-truth list (for extended metric computation).
+            base_metrics:    Dict from metrics.compute_dataset_metrics — dice/miou/hd95/asd
+                             plus precision/recall/specificity/f2/accuracy (computed there
+                             directly, including for multiclass via a proper per-class
+                             one-vs-rest decomposition — no longer skipped the way the old
+                             utils.report.compute_extended_metrics used to skip multiclass).
             num_samples:     Number of test images evaluated.
             eval_duration_s: Wall-clock seconds the evaluation loop took.
-            is_multiclass:   Precision/Recall/Specificity/F2 assume binary
-                             masks (bool cast); for multiclass label maps this
-                             would silently collapse all foreground classes
-                             into one, so they're skipped instead.
+            is_multiclass:   Whether this run's masks are multiclass label maps
+                             (affects which report sections render, not which
+                             metrics get computed — see above).
         """
         self._metrics_base    = base_metrics
+        # "ext" (precision/recall/specificity/f2/accuracy) is no longer a
+        # separately-computed dict — metrics.compute_dataset_metrics already
+        # includes it in base_metrics. Kept as its own attribute (rather than
+        # inlining base_metrics everywhere below) since several render
+        # methods already key off self._metrics_ext specifically.
+        self._metrics_ext     = {k: v for k, v in base_metrics.items() if k != "per_class"}
         self._per_class       = base_metrics.get("per_class", {})
         self._num_samples     = num_samples
         self._eval_duration_s = eval_duration_s
         self._is_multiclass   = is_multiclass
-
-        if preds and gts and not is_multiclass:
-            try:
-                self._metrics_ext = compute_extended_metrics(preds, gts)
-            except Exception as exc:
-                if self.logger:
-                    self.logger.warning(f"Could not compute extended metrics: {exc}")
-                self._metrics_ext = {}
-        else:
-            self._metrics_ext = {}
 
         # set_model_info() snapshots GPU memory before the main eval loop
         # (so latency measurement isn't contaminated by it), which means it
@@ -392,8 +324,6 @@ class EvaluationReporter:
         # now that the full pass has run.
         if self._device is not None:
             self._gpu_mem = get_gpu_memory_usage(self._device)
-        else:
-            self._metrics_ext = {}
 
     # ------------------------------------------------------------------
     # Rendering helpers
@@ -451,18 +381,17 @@ class EvaluationReporter:
         """Build a flat list-of-rows for tabulate (2-column format)."""
         m   = self._metrics_base
         ext = self._metrics_ext
-        ext_note = " (N/A — multiclass)" if self._is_multiclass else ""
 
         rows = [
             # --- Segmentation quality ---
             ["━━ SEGMENTATION QUALITY ━━", ""],
             ["Dice / F1-Score",          _safe_fmt(m.get("dice"),  ".4f")],
             ["mean IoU (mIoU)",          _safe_fmt(m.get("miou"),  ".4f")],
-            ["Precision" + ext_note,                _safe_fmt(ext.get("precision"),   ".4f")],
-            ["Recall (Sensitivity)" + ext_note,      _safe_fmt(ext.get("recall"),      ".4f")],
-            ["Specificity" + ext_note,               _safe_fmt(ext.get("specificity"), ".4f")],
-            ["F2-Score (β=2)" + ext_note,            _safe_fmt(ext.get("f2"),          ".4f")],
-            ["Pixel Accuracy" + ext_note,            _safe_fmt(ext.get("accuracy"),    ".4f")],
+            ["Precision",                _safe_fmt(ext.get("precision"),   ".4f")],
+            ["Recall (Sensitivity)",     _safe_fmt(ext.get("recall"),      ".4f")],
+            ["Specificity",              _safe_fmt(ext.get("specificity"), ".4f")],
+            ["F2-Score (β=2)",           _safe_fmt(ext.get("f2"),          ".4f")],
+            ["Pixel Accuracy",           _safe_fmt(ext.get("accuracy"),    ".4f")],
             ["HD95 (Hausdorff 95%)",
              f"{m.get('hd95'):.2f} px" if (m.get("hd95", 0) > 0) else "N/A"],
             ["ASD (Avg Surface Dist)",

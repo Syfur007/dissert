@@ -1,0 +1,22 @@
+# BUSI (Breast Ultrasound Images) dataset identity fragment.
+#
+# UNVERIFIED against real data (see datasets/busi.py's module docstring) —
+# no BUSI files exist in the environment this fragment was authored in.
+# Point `root` at your actual download (the `Dataset_BUSI_with_GT` folder,
+# containing benign/malignant/normal subfolders) and sanity-check a few
+# (image, mask) pairs load correctly before trusting a training run.
+#
+# BUSI ships no official split, so — unlike clinicdb.yaml/colondb.yaml —
+# this fragment also sets `dataset.split` ratios; override them per
+# experiment if needed. `dedup: true` (the handler's default) is
+# mandatory per the spec, not just this fragment's default — don't set it
+# to false except to skip re-running the (slow, one-time) dedup pass on
+# data you've already deduplicated.
+dataset:
+  name: "BUSI"
+  root: "data/busi/Dataset_BUSI_with_GT"
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  dedup: true

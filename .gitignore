@@ -7,6 +7,7 @@
 !/env/environment.lock
 /runs
 /pretrained_pth
+/artifacts
 __pycache__/
 *.pyc
 /dashboard

@@ -6,13 +6,14 @@ import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 
+from metrics import compute_dataset_metrics
 from models import get_model
 from datasets import StandardSplitDataModule
+from datasets.splits import TestLoaderGuardError
 from training.determinism import reset_recorded_nondeterminism, seed_everything
 from utils.config import load_config
 from utils import (
     setup_logger,
-    compute_dataset_metrics,
     log_model_summary,
     measure_throughput,
     EvaluationReporter,
@@ -105,7 +106,7 @@ def evaluate(model, dataloader, device, is_multiclass=False):
     model.eval()
 
     with torch.no_grad():
-        for images, masks in tqdm(dataloader, desc="Evaluating"):
+        for images, masks, _meta in tqdm(dataloader, desc="Evaluating"):
             images = images.to(device)
             outputs = model(images)
 
@@ -124,8 +125,10 @@ def evaluate(model, dataloader, device, is_multiclass=False):
             gts_list.extend([m.cpu().numpy().astype(np.uint8) for m in masks])
             probs_list.extend([p for p in probs_np])
 
-    # Calculate Dice, IoU, HD95, ASD (+ per_class breakdown for multiclass)
-    metrics = compute_dataset_metrics(preds_list, gts_list)
+    # Calculate Dice, IoU, HD95, ASD, NSD, precision/recall/specificity/F2/
+    # accuracy, ECE (+ per_class breakdown for multiclass) — the one
+    # canonical call, per metrics/aggregate.py.
+    metrics = compute_dataset_metrics(preds_list, gts_list, probs=probs_list)
     return metrics, preds_list, gts_list, probs_list
 
 
@@ -138,6 +141,13 @@ def main():
     parser.add_argument("--dataset_dir", type=str, default=None)
     parser.add_argument("--no-vis",      action="store_true",
                         help="Skip confusion matrix / ROC / PR curve generation.")
+    parser.add_argument("--test-token",  type=str, default=None,
+                        help="Pre-minted test-evaluation token (see "
+                             "orchestration.ledger.LedgerWriter.issue_test_token). "
+                             "Required to evaluate the test set unless --allow-test-eval is given.")
+    parser.add_argument("--allow-test-eval", action="store_true",
+                        help="Mint a fresh test-evaluation token for this run (records a "
+                             "Test_Evals ledger row) instead of requiring a pre-minted --test-token.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -162,9 +172,36 @@ def main():
     logger.info(f"Using device: {device}")
     logger.info(f"Eval log dir: {exp_log_dir}")
 
+    # ── Test-loader guard token ────────────────────────────────────────
+    # Touching the test set requires a token minted by
+    # orchestration.ledger.LedgerWriter.issue_test_token() — either a
+    # pre-minted one (--test-token, e.g. from an orchestrated sweep) or a
+    # freshly self-issued one (--allow-test-eval, for a manual run); either
+    # way a Test_Evals ledger row is left behind.
+    if args.test_token:
+        test_token = args.test_token
+    elif args.allow_test_eval:
+        from orchestration.ledger import LedgerWriter
+        from orchestration.runid import config_hash as _config_hash
+        test_token = LedgerWriter().issue_test_token(
+            run_id=f"manual-eval-{log_cfg['experiment_name']}",
+            config_hash=_config_hash(config),
+        )
+    else:
+        logger.error(
+            "Evaluating the test set requires --test-token <TOKEN> (from an "
+            "orchestrated sweep) or --allow-test-eval (mints one for this "
+            "manual run). Refusing to proceed without a recorded test-eval token."
+        )
+        return
+
     # Init Datamodule
     dm = StandardSplitDataModule(config)
-    test_loader = dm.get_test_loader()
+    try:
+        test_loader = dm.get_test_loader(test_token)
+    except TestLoaderGuardError as exc:
+        logger.error(str(exc))
+        return
 
     if test_loader is None:
         logger.error("No test set filenames or separate test directory was found in configuration.")
@@ -315,8 +352,6 @@ def main():
     # ── Report ─────────────────────────────────────────────────────────
     reporter.set_eval_results(
         base_metrics    = metrics,
-        preds           = preds_list,
-        gts             = gts_list,
         num_samples     = len(test_loader.dataset),
         eval_duration_s = eval_duration,
         is_multiclass   = is_multiclass,

@@ -3,14 +3,11 @@ from .early_stopping import EarlyStopping
 from .checkpoint import CheckpointManager, atomic_torch_save
 from .metrics import (
     count_parameters,
-    get_binary_metrics,
-    compute_dataset_metrics,
     measure_throughput,
     log_model_summary,
 )
 from .report import (
     EvaluationReporter,
-    compute_extended_metrics,
     get_model_memory_size,
     get_latency_stats,
     get_gpu_memory_usage,
@@ -23,6 +20,10 @@ from .visualize import (
 )
 from .plot_training import plot_training_curves
 
+# Segmentation-quality metrics (Dice/IoU/HD95/ASD/...) live in the top-level
+# metrics/ package (see metrics/aggregate.py's compute_dataset_metrics) —
+# import from there directly, not from utils.
+
 __all__ = [
     # logger
     "setup_logger",
@@ -31,15 +32,12 @@ __all__ = [
     "CheckpointManager",
     "atomic_torch_save",
     "EarlyStopping",
-    # metrics
+    # profiling (utils/metrics.py — Phase 10 will relocate these to profiling/)
     "count_parameters",
-    "get_binary_metrics",
-    "compute_dataset_metrics",
     "measure_throughput",
     "log_model_summary",
     # report
     "EvaluationReporter",
-    "compute_extended_metrics",
     "get_model_memory_size",
     "get_latency_stats",
     "get_gpu_memory_usage",

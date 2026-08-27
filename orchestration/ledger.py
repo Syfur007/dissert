@@ -8,13 +8,15 @@ appending at once can corrupt the zip container); a CSV append is a single
 ``open(..., "a")`` + one row + close, safe under concurrent appenders in the
 way an open-for-the-whole-run xlsx workbook handle is not.
 
-Only ``Runs`` and ``Compute`` are populated by Phase 1 (via
-:class:`LedgerWriter` from :mod:`orchestration.runner`). ``Test_Evals`` rows
-are appended by Phase 3's ``issue_test_token()`` (the guarded test-loader
-mechanism doesn't exist yet); ``Stats`` rows are appended by Phase 9. Both
-tables' schemas are declared here now so every consumer of this module
-agrees on the column set from the start, even though nothing writes to them
-yet.
+``Runs``/``Compute`` are populated via :class:`LedgerWriter` from
+:mod:`orchestration.runner` (Phase 1); ``Test_Evals`` via this module's
+:meth:`LedgerWriter.issue_test_token` (Phase 3) — the only way
+``datasets.datamodule``'s guarded ``get_test_loader(token)`` accepts a
+token, so "did this run touch the test set" is a fact recorded in the
+ledger, not just a convention nobody enforces. ``Stats`` rows are appended
+by Phase 9; its schema is declared here now so every consumer of this
+module agrees on the column set from the start, even though nothing writes
+to it yet.
 """
 from __future__ import annotations
 
@@ -82,6 +84,41 @@ class LedgerWriter:
 
     def append_test_eval_row(self, **kwargs: Any) -> None:
         self._append_row("test_evals", kwargs)
+
+    def issue_test_token(
+        self, run_id: str, config_hash: str, checkpoint_path: str = ""
+    ) -> str:
+        """Mint a one-time-use test-evaluation token and record it in the
+        Test_Evals table as a side effect. ``datasets.datamodule``'s
+        guarded ``get_test_loader(token)`` only accepts a token that was
+        actually minted here — the point is that "did this run touch the
+        test set" becomes a fact recorded in the ledger, not a convention
+        (a ``--allow-test-eval`` flag nobody actually checks) that's easy
+        to forget or route around.
+        """
+        import secrets
+        from datetime import datetime, timezone
+
+        token = secrets.token_hex(16)
+        self.append_test_eval_row(
+            run_id=run_id,
+            token=token,
+            issued_time=datetime.now(timezone.utc).isoformat(),
+            config_hash=config_hash,
+            checkpoint_path=checkpoint_path,
+        )
+        return token
+
+    def has_test_token(self, token: str) -> bool:
+        """True if *token* has a matching row in the Test_Evals table —
+        the check ``get_test_loader(token)`` performs. A CSV-scan-per-call
+        is fine here: this runs once per eval.py invocation, not per batch.
+        """
+        path = self._table_path("test_evals")
+        if not path.exists():
+            return False
+        with open(path, newline="") as f:
+            return any(row.get("token") == token for row in csv.DictReader(f))
 
     def append_stats_row(self, **kwargs: Any) -> None:
         self._append_row("stats", kwargs)

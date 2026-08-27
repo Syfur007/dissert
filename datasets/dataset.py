@@ -13,13 +13,36 @@ Features
   masks on construction if the estimated footprint is under
   ``cache_size_limit_gb``.  Skipped with a warning when the dataset is
   too large.
+- ``__getitem__`` returns ``(image, mask, meta)`` — see METADATA_KEYS
+  below. This is a project-wide contract (Phase 3 of
+  IMPLEMENTATION_PLAN.md): every dataset, including ClinicDB/ColonDB, not
+  just new ones, carries the same ``meta`` shape, so a leakage guard that
+  reads ``meta["subject_id"]`` works identically regardless of which
+  dataset handler produced a sample.
 """
 import os
+from pathlib import Path
+from typing import Callable, Optional
+
 import cv2
 import torch
 import numpy as np
 from loguru import logger
 from torch.utils.data import Dataset
+
+# Keys always present in the ``meta`` dict __getitem__ returns.
+METADATA_KEYS = ("subject_id", "source_dataset", "spacing", "artefact_flags")
+
+
+def _default_subject_id_fn(img_path: str) -> str:
+    """Frame-level identity: the image filename stem. The honest default
+    for any dataset without a real subject/patient grouping mapping — see
+    each handler's ARTEFACT_FLAGS for whether that's a meaningful
+    simplification (BUSI/ISIC18: effectively one image per case already) or
+    a real limitation (ClinicDB/ColonDB: frame extracts from a handful of
+    source videos, so this under-counts how few truly independent subjects
+    exist — see datasets/polyp/{clinicdb,colondb}.py's ARTEFACT_FLAGS)."""
+    return Path(img_path).stem
 
 
 class DataIntegrityError(Exception):
@@ -37,10 +60,21 @@ class MedicalSegmentationDataset(Dataset):
         validate: bool = False,
         cache: bool = False,
         cache_size_limit_gb: float = 4.0,
+        source_dataset: str = "",
+        subject_id_fn: Optional[Callable[[str], str]] = None,
+        artefact_flags: Optional[dict] = None,
     ):
         self.transform = transform
         # None  → no caching; dict → caching enabled (filled in _prefetch)
         self._cache: dict | None = {} if cache else None
+
+        self.source_dataset = source_dataset
+        self._subject_id_fn = subject_id_fn or _default_subject_id_fn
+        # Shared by every sample from this dataset instance (dataset-level,
+        # not per-image) — e.g. {"frame_level_only_no_video_grouping": True}.
+        # Immutable per instance: build a new MedicalSegmentationDataset
+        # rather than mutating this dict on a shared instance.
+        self.artefact_flags = dict(artefact_flags) if artefact_flags else {}
 
         if pairs is not None:
             self.pairs = list(pairs)
@@ -182,10 +216,11 @@ class MedicalSegmentationDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx):
+        img_path, mask_path = self.pairs[idx]
+
         if self._cache is not None and idx in self._cache:
             image, mask = self._cache[idx]
         else:
-            img_path, mask_path = self.pairs[idx]
             image = cv2.imread(img_path)
             if image is None:
                 raise FileNotFoundError(f"Image not found: {img_path}")
@@ -193,6 +228,19 @@ class MedicalSegmentationDataset(Dataset):
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 raise FileNotFoundError(f"Mask not found: {mask_path}")
+
+        meta = {
+            "subject_id": self._subject_id_fn(img_path),
+            "source_dataset": self.source_dataset,
+            # () rather than None: torch's default DataLoader collate_fn
+            # (as of this repo's torch 1.13 pin) raises on a bare None
+            # inside a dict value, but happily collates an empty sequence
+            # into an empty list — use () here, not None, for "no spacing
+            # metadata available" (e.g. every dataset in this repo so far:
+            # plain PNG/JPG, not DICOM/NIfTI).
+            "spacing": (),
+            "artefact_flags": self.artefact_flags,
+        }
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
@@ -213,4 +261,4 @@ class MedicalSegmentationDataset(Dataset):
             # at object boundaries, where HD95/ASD are most sensitive.
             mask = (mask > 127).float()
 
-        return image, mask.float()
+        return image, mask.float(), meta

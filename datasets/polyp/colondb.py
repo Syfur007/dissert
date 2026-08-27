@@ -23,7 +23,17 @@ class ColonDB:
 
     NAME = "colondb"
 
-    def __init__(self, cfg: dict):
+    # See datasets/dataset.py's _default_subject_id_fn / METADATA_KEYS:
+    # filenames are flat sequential integers with no recoverable
+    # source-video id, so subject_id honestly falls back to frame-level
+    # identity — this flag is that caveat's machine-readable home (was
+    # previously only in KFoldDataModule's class docstring).
+    ARTEFACT_FLAGS = {"frame_level_only_no_video_grouping": True}
+
+    def __init__(self, cfg: dict, seed: int = 42):
+        # seed is part of the handler interface (datasets/datamodule.py's
+        # DATASETS registry) but unused here — ColonDB ships pre-made
+        # train/val/test lists, nothing to randomly split.
         root = cfg.get("root", "data/polyp/ColonDB")
         # (image_dir, mask_dir, list_file) per split
         self._splits = {
@@ -67,6 +77,8 @@ class ColonDB:
     def get_dataset(self, split: str, transform=None, **kwargs) -> MedicalSegmentationDataset:
         """Return a ``MedicalSegmentationDataset`` for *split* ('train'/'val'/'test')."""
         img_dir, mask_dir, names = self._resolve_files(split)
+        kwargs.setdefault("source_dataset", self.NAME)
+        kwargs.setdefault("artefact_flags", self.ARTEFACT_FLAGS)
         return MedicalSegmentationDataset(img_dir, mask_dir, filenames=names, transform=transform, **kwargs)
 
     def get_kfold_pairs(self) -> list:
