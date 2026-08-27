@@ -201,7 +201,7 @@ def test_rolling_tracks_canonical_at_epoch_end(tiny_config_factory):
 
     model = get_model(**cfg["model"]).to(device)
     criterion = get_loss(cfg["training"]["loss_type"], num_classes=cfg["model"]["out_channels"])
-    optimizer = build_optimizer(cfg["training"], model.parameters())
+    optimizer = build_optimizer(cfg["training"], model)
     scheduler, step_mode = build_scheduler(
         cfg["training"], optimizer, steps_per_epoch=len(train_loader)
     )

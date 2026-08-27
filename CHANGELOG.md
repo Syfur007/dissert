@@ -260,3 +260,116 @@ on the actual training machine before treating Phase 0 as fully closed there.
   now threads `source_dataset`/`artefact_flags` through explicitly (it constructs
   `MedicalSegmentationDataset` directly from cached fold pairs, bypassing the handler's
   `get_dataset()`, so couldn't inherit them the way `StandardSplitDataModule` does).
+
+## Phase 4 — Channel construction module + modality-driven augmentation policy (2026-08-28)
+
+- **New `datasets/channels.py`**: `build_channels(image, mode, order)` for m1 (rgb) / m2 (rgb+xy) /
+  m3 (rgb+ycbcr) / m4 (rgb+xy+rtheta) / m5 (all), built from named channel *groups* (not hardcoded
+  per-mode logic) so a caller can pin an explicit `order` — the group boundaries this produces are
+  what Phase 11's per-group Shapley attribution will slice by. `xy_channels()` ([-1,1] position),
+  `r_theta_channels()` (radius + sin/cos(θ) — sin/cos specifically to avoid the -π/π branch cut a
+  raw angle channel would have along the negative x-axis), `randproj_channels()`/
+  `coordonly_channels()` ablation controls, `modality_effective_channels()` (drops the `ycbcr`
+  group for `modality=grayscale` — closes `models/baseline/emcad.py`'s old ad hoc
+  "if grayscale, repeat to 3ch" gap at the *data* level instead of patching every model), per-mode
+  channel-stats caching (`channel_norm_stats()`, hashed by dataset+mode+modality).
+  `models/proposed/gmk_unet.py`'s private `_ycbcr()` now imports `ycbcr_from_rgb_tensor()` from
+  here instead of defining its own — same BT.601 coefficients (`_YCBCR_COEFFS`), shared with the
+  numpy path `build_channels()` uses, so the two can never numerically drift apart even though one
+  runs on live GPU tensors during a forward pass and the other on numpy arrays at data-loading
+  time (confirmed 0.0 max diff between the two on a real ClinicDB image). Verified the real
+  `gmkunet_t_clinicdb` checkpoint still reproduces the exact baseline (Dice 0.7816) after this
+  swap.
+- **New `datasets/augment.py`**: `AugmentationPolicy`, built once per dataset from
+  `(modality, ds_cfg)`. Enforces ORDER=post (geometric augmentation via Albumentations first, then
+  `build_channels()` regenerates XY/Rθ from the *already-augmented* frame — a pre-augmentation XY
+  channel would encode stale coordinates once the frame is flipped/rotated). Modality-conditioned
+  augmentation intensity (spec §5.4's colour vs. grayscale-ultrasound vs. grayscale-microscopy):
+  the config schema only exposes the coarse `dataset.modality: colour|grayscale` the spec fixes at
+  dataset level, so the finer ultrasound-vs-microscopy split (needed only for augmentation
+  intensity, not channel construction) is resolved from `dataset.name` via a small
+  `_GRAYSCALE_SUBTYPE` table (`{"busi": "ultrasound"}` today; no microscopy dataset registered
+  yet).
+- Config schema gained `dataset.modality` (`colour|grayscale`, default `colour`), `channel_mode`
+  (`m1`..`m5`, default `m1`), `channel_order`. All three are inert by default — every existing
+  config stays on `m1`/`colour` (today's plain-RGB pipeline, byte-for-byte unchanged) unless a
+  config explicitly opts into a different mode.
+- **Deliberately not wired into the live training pipeline this phase**: `datasets/dataset.py`/
+  `datasets/datamodule.py` still call `transforms.build_transforms()` directly, not
+  `AugmentationPolicy` — no model in Phases 0–5 accepts non-RGB input, so there's nothing yet to
+  consume `channel_mode` > m1. Phase 6 is explicitly where this gets wired in for real: the Mamba
+  model's auxiliary VSS encoder is specified to consume the same multi-channel input as the
+  primary encoder, via `dataset.channel_mode`.
+- **New `tests/test_channels.py`** (9 tests): the five the plan names —
+  `test_val_test_no_augment`, `test_mask_interpolation`, `test_channel_order`,
+  `test_theta_continuity`, `test_grayscale_drops_colour` — plus a BT.601 reference-value check and
+  an `AugmentationPolicy` dataset-specific intensity-scale check. Found and fixed two real bugs
+  while writing these: the first `test_theta_continuity` draft swept a row that passed through the
+  coordinate origin itself (a genuine r=0 singularity no encoding can smooth over, different from
+  the branch-cut discontinuity sin/cos is actually meant to fix) rather than testing the branch cut
+  itself — rewrote it to sweep a fixed negative-x *column* through y=0, which is where the branch
+  cut actually lives, and added a direct comparison confirming a raw `atan2` channel really does
+  jump there (~2π) while sin/cos doesn't. Also fixed a wrong transform-list index (`[-2]` instead
+  of `[-3]`) in the augmentation-intensity test. 45/45 tests passing repo-wide.
+
+## Phase 5 — Model registry hardening: capacity control, budget guard, parameter-group optimizer (2026-08-28)
+
+- **New `models/build.py`**: `build_width_matched(base_model_fn, width_candidates, input_shape,
+  target_params, target_flops, tol)` — searches a model family's already-exposed width-scaling
+  knob (MK-UNet/GMK-UNet's channels-list presets) for a configuration matching a target
+  param/FLOPs budget. Verified against real MK-UNet presets: finds an exact match (0.0 relative
+  error) when the target is in the candidate list, correctly reports `within_tolerance: False`
+  with the closest candidate otherwise.
+- **`models/registry.py`**: `ModelRegistry.get()` (and `get_model()`) gained
+  `budget_ceiling`/`allow_over_budget` — profiles every built model immediately and raises
+  `ModelBudgetExceededError` unless the override is explicit. Applies to every registered model,
+  including whichever one Phase 6 adds — the `@register` decorator API itself is unchanged.
+- **`training/optimizers.py`**: `build_optimizer(cfg, model)` — signature changed from
+  `build_optimizer(cfg, params)` (confirmed zero param-group splitting before this) to take the
+  whole model, not `model.parameters()`, since the new `no_decay_group(model)` needs each
+  parameter's dotted name and owning module to split by *name* (bias / normalisation-layer
+  affine params / — forward-looking for Phase 6 — a parameter literally named `A_log` or `D`),
+  not by tensor shape. Two param groups (`weight_decay` / `0.0`) built and logged for every
+  optimizer choice (Adam/AdamW/SGD). Updated both call sites: `train.py`'s main path and
+  `training/trainer.py`'s multi-stage `_fit_staged()` rebuild (which used to pass a
+  `filter(requires_grad, ...)` iterator — `no_decay_group()` already skips frozen params via its
+  own `requires_grad` check, so passing the whole model post-`_set_frozen()` produces the same
+  trainable-only set without a separate filter step).
+- **Real finding, fixed**: this param-group change breaks resuming from any checkpoint saved
+  under the old single-group optimizer (`optimizer.load_state_dict()` raises `ValueError` on a
+  param-group-count mismatch) — caught running the real training smoke test, not a unit test.
+  Fixed in `utils/checkpoint.py`'s `CheckpointManager.load()`: catches that specific `ValueError`,
+  logs a clear warning, and continues with a freshly-initialised optimizer rather than crashing
+  the whole resume — model weights (the expensive part) still load and restore correctly; only
+  Adam's per-parameter moment estimates are lost, once, for any checkpoint that predates this
+  change. Verified end-to-end: a real resume from a pre-existing checkpoint now degrades
+  gracefully with a warning instead of crashing, and training continues correctly from there.
+- **New `tests/test_optim.py`** (4 tests) and **`tests/test_models.py`** (6 tests): the two the
+  plan names — `test_param_groups`, `test_capacity_control_match` — plus frozen-param exclusion,
+  SGD param-grouping, no-target/no-candidates validation, and the registry budget guard
+  (raises/bypasses/not-triggered). 56/56 tests passing repo-wide.
+
+## Phase 5.5 — MVP checkpoint reached (2026-08-28)
+
+Verified per the plan's own criterion: ran `orchestration.runner.run_sweep()` across 2 real model
+families (`mk_unet_t`, `gmk_unet_t`) × 2 seeds on real ClinicDB data — 4 real training runs, not
+mocked. Confirmed: distinct `config_hash` per family (shared across seeds), distinct `run_id` per
+(family, seed), correct manifests (resolved config, git commit + dirty flag, env hash, hardware,
+timing) and ledger rows written for all 4; re-running the identical sweep call afterward correctly
+reports all 4 as `skipped-done` with zero retraining. Along the way, found that the two seeds'
+validation Dice was suspicious identical — investigated directly (not dismissed): confirmed via a
+3-seed direct comparison that *training* metrics (loss, train Dice) do differ correctly per seed,
+but a ~40K-parameter model after a single epoch collapses to an identical hard-thresholded
+all-background validation prediction regardless of seed, which makes Dice/HD95/ASD — computed on
+the thresholded output, not the raw logits — genuinely identical by construction, not a
+determinism bug. (Also incidentally confirmed Phase 2's boundary-metric exclusion behaviour is
+working as designed: an all-background prediction against ClinicDB's always-non-empty ground
+truth excludes every sample from HD95/ASD, correctly producing 0.0 as "mean of zero excluded
+samples," not a misleadingly "perfect" score — visible via `hd95_excluded_n` for anyone who checks
+it, which is the point of tracking that field at all.)
+
+Phases 0–5 now let a user run config-hashed, leakage-guarded, canonically-metriced experiments
+across all 6 existing model families (5 baselines + GMK-UNet ×5 sizes) on ClinicDB/ColonDB (BUSI/
+ISIC18 handlers are in place but unverified against real data — see Phase 3's entry), with a
+working idempotent sweep/ledger. Per the plan, Phase 6 (Mamba) is dissertation-critical but not
+MVP-blocking.

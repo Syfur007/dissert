@@ -5,7 +5,7 @@ Usage::
 
     from training.optimizers import build_optimizer, build_scheduler
 
-    optimizer = build_optimizer(training_cfg, model.parameters())
+    optimizer = build_optimizer(training_cfg, model)
     scheduler, step_mode = build_scheduler(training_cfg, optimizer, steps_per_epoch=len(train_loader))
 
 ``step_mode`` is either ``'epoch'`` (call scheduler.step() once per epoch) or
@@ -16,10 +16,12 @@ type itself.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
+import torch.nn as nn
 import torch.optim as optim
+from loguru import logger
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     ReduceLROnPlateau,
@@ -27,9 +29,54 @@ from torch.optim.lr_scheduler import (
     OneCycleLR,
 )
 
+_NORM_MODULE_TYPES = (
+    nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+    nn.GroupNorm, nn.LayerNorm,
+    nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d,
+)
 
-def build_optimizer(cfg: Dict[str, Any], params: Iterable) -> optim.Optimizer:
-    """Instantiate an optimizer from config.
+# Bare parameter names (not dotted paths) excluded from weight decay
+# regardless of which module owns them. `.bias` is handled separately
+# (it's a near-universal convention across module types); A_log/D are
+# Mamba/SSM-specific — no model in this registry defines them yet, but
+# every published Mamba implementation excludes them from decay, and
+# Phase 6 needs this in place before that model exists, not patched in
+# after the fact.
+_NO_DECAY_PARAM_NAMES = {"A_log", "D"}
+
+
+def no_decay_group(model: nn.Module) -> Tuple[List[nn.Parameter], List[nn.Parameter]]:
+    """Split model.named_parameters() into (decay, no_decay) by *name*,
+    not by tensor shape: a bias, a normalisation layer's affine scale/shift
+    (BatchNorm/GroupNorm/LayerNorm/InstanceNorm's weight+bias), or a
+    parameter literally named A_log/D goes in no_decay; everything else
+    (conv/linear weight matrices, embeddings) goes in decay.
+    """
+    norm_param_ids = {
+        id(p)
+        for module in model.modules()
+        if isinstance(module, _NORM_MODULE_TYPES)
+        for p in module.parameters(recurse=False)
+    }
+
+    decay: List[nn.Parameter] = []
+    no_decay: List[nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf == "bias" or leaf in _NO_DECAY_PARAM_NAMES or id(param) in norm_param_ids:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return decay, no_decay
+
+
+def build_optimizer(cfg: Dict[str, Any], model: nn.Module) -> optim.Optimizer:
+    """Instantiate an optimizer from config, with weight decay split into
+    two parameter groups via no_decay_group() — biases, normalisation-layer
+    affine parameters, and (forward-looking, for Phase 6) A_log/D never get
+    weight-decayed, regardless of optimizer choice.
 
     Config keys read (all under ``training:``):
         optimizer      (str)   — 'adam' | 'adamw' | 'sgd'
@@ -41,8 +88,10 @@ def build_optimizer(cfg: Dict[str, Any], params: Iterable) -> optim.Optimizer:
         nesterov       (bool)  — Nesterov SGD (default False)
 
     Args:
-        cfg:    The ``training`` sub-dict from the full config.
-        params: Model parameters (``model.parameters()`` or a param-group list).
+        cfg:   The ``training`` sub-dict from the full config.
+        model: The model to optimise — **not** ``model.parameters()``;
+            no_decay_group() needs each parameter's dotted name and owning
+            module, not just the bare tensors.
 
     Returns:
         Configured optimizer instance.
@@ -55,15 +104,23 @@ def build_optimizer(cfg: Dict[str, Any], params: Iterable) -> optim.Optimizer:
     momentum     = cfg.get("momentum", 0.9)
     nesterov     = cfg.get("nesterov", False)
 
+    decay_params, no_decay_params = no_decay_group(model)
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    logger.info(
+        f"Optimizer param groups | decay: {len(decay_params)} tensors | "
+        f"no_decay: {len(no_decay_params)} tensors"
+    )
+
     if name == "adam":
-        return optim.Adam(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return optim.Adam(param_groups, lr=lr, betas=betas, eps=eps)
     elif name == "adamw":
-        return optim.AdamW(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        return optim.AdamW(param_groups, lr=lr, betas=betas, eps=eps)
     elif name == "sgd":
-        return optim.SGD(
-            params, lr=lr, momentum=momentum,
-            weight_decay=weight_decay, nesterov=nesterov
-        )
+        return optim.SGD(param_groups, lr=lr, momentum=momentum, nesterov=nesterov)
     else:
         raise ValueError(
             f"Unknown optimizer '{name}'. Supported: 'adam', 'adamw', 'sgd'."

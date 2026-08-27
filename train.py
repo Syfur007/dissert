@@ -126,7 +126,7 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     ).to(device)
 
     # ── Optimizer / Scheduler ──────────────────────────────────────────
-    optimizer                        = build_optimizer(training_cfg, model.parameters())
+    optimizer                        = build_optimizer(training_cfg, model)
     scheduler, scheduler_step_mode   = build_scheduler(
         training_cfg, optimizer, steps_per_epoch=len(train_loader)
     )

@@ -12,6 +12,7 @@ __all__ = ['GMK_UNet']
 
 from ..blocks import _init_weights, act_layer as _act, channel_shuffle as _channel_shuffle, ChannelAttention, SpatialAttention
 from ..registry import MODEL_REGISTRY
+from datasets.channels import ycbcr_from_rgb_tensor as _ycbcr
 
 class _MultiKernelDWConv(nn.Module):
     def __init__(self, channels, kernel_sizes, stride, activation='relu6', parallel=True):
@@ -87,15 +88,6 @@ def _mk_stage(in_c, out_c, n, expansion=2, parallel=True,
 # ---------------------------------------------------------------------------
 # GMK-specific blocks
 # ---------------------------------------------------------------------------
-
-def _ycbcr(x):
-    """Differentiable RGB → YCbCr (BT.601). Returns luma [B,1,H,W] and chroma [B,2,H,W]."""
-    r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
-    y  =  0.299000 * r + 0.587000 * g + 0.114000 * b
-    cb = -0.168736 * r - 0.331264 * g + 0.500000 * b + 0.5
-    cr =  0.500000 * r - 0.418688 * g - 0.081312 * b + 0.5
-    return y, torch.cat([cb, cr], dim=1)
-
 
 class ExponentialDecayGating(nn.Module):
     """

@@ -125,6 +125,16 @@ class DatasetConfig(_Strict):
     # every other handler.
     dedup: bool = True
 
+    # Phase 4 (datasets/channels.py, datasets/augment.py). modality is
+    # fixed at dataset level (a dataset simply is colour or grayscale) —
+    # not overridable per-experiment the way channel_mode/channel_order
+    # are. datasets.augment.AugmentationPolicy resolves the finer
+    # ultrasound-vs-microscopy augmentation-intensity split from
+    # dataset.name, not from this field.
+    modality: Literal["colour", "grayscale"] = "colour"
+    channel_mode: Literal["m1", "m2", "m3", "m4", "m5"] = "m1"
+    channel_order: Optional[List[str]] = None
+
     # ISIC18-specific (datasets/isic18.py): override the official
     # directory names when a download's layout doesn't match them exactly.
     # Ignored by every other handler.

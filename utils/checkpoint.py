@@ -126,8 +126,25 @@ class CheckpointManager:
         model.load_state_dict(state_dict, strict=False)
         
         if optimizer and checkpoint.get('optimizer_state_dict'):
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            except ValueError as exc:
+                # A checkpoint saved before training/optimizers.py split
+                # weight decay into decay/no_decay param groups has a
+                # single-group optimizer state that can't be restored into
+                # today's two-group optimizer (same underlying model
+                # weights, different optimizer *structure*). Losing Adam's
+                # per-parameter moment estimates is a real cost, but it's
+                # far cheaper than losing the whole resume — model weights
+                # above already loaded fine, so continue with a freshly
+                # initialised optimizer instead of crashing the run.
+                logger.warning(
+                    f"Could not restore optimizer state from {checkpoint_path} "
+                    f"({exc}) — likely a pre-parameter-group checkpoint. "
+                    "Continuing with a freshly initialised optimizer; model "
+                    "weights were restored successfully."
+                )
+
         if scheduler and checkpoint.get('scheduler_state_dict'):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 

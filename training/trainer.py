@@ -297,8 +297,13 @@ class Trainer:
                 )
             else:
                 stage_tcfg = {**self._tcfg, "lr": stage_lr}
-                trainable  = filter(lambda p: p.requires_grad, self.model.parameters())
-                self.optimizer = build_optimizer(stage_tcfg, trainable)
+                # build_optimizer/no_decay_group already skip
+                # requires_grad=False params (see training/optimizers.py),
+                # so passing the whole model here — post _set_frozen()
+                # above — already excludes this stage's frozen submodules
+                # from both param groups, the same as the old
+                # `filter(lambda p: p.requires_grad, ...)` did.
+                self.optimizer = build_optimizer(stage_tcfg, self.model)
                 self.scheduler, self.scheduler_step_mode = build_scheduler(
                     stage_tcfg, self.optimizer,
                     steps_per_epoch=len(self.train_loader),
