@@ -15,14 +15,4 @@ dataset:
   batch_size: 16
 
 logging:
-<<<<<<< HEAD
-  log_dir: "logs"
-  tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "mkunet_m_clinicdb"
-  log_interval: 10         # Print/log training progress every N batches
-=======
-  # NB: previously misconfigured as "mkunet_clinicdb" (copy-paste from the
-  # base-size variant), which would have silently overwritten that variant's
-  # checkpoints/logs/TensorBoard runs. Fixed 2026-08-26.
-  experiment_name: "mkunet_m_clinicdb"
->>>>>>> f9ede17 (Refactor dataset handling and metrics computation)

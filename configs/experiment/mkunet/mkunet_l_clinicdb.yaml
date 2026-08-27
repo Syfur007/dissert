@@ -15,8 +15,4 @@ dataset:
   batch_size: 16
 
 logging:
-  log_dir: "logs"
-  tb_dir: "runs"           # TensorBoard event log directory
-  experiment_name: "mkunet_l_clinicdb"
-  log_interval: 10         # Print/log training progress every N batches
   experiment_name: "mkunet_l_clinicdb"

@@ -12,8 +12,6 @@ model:
   gag_kernel: 3
 
 dataset:
-  name: "ColonDB"
-  root: "data/polyp/ColonDB"
   batch_size: 16
 
 logging:
