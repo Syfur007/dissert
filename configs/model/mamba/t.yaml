@@ -1,0 +1,22 @@
+model:
+  name: "mamba_unet"
+  channels: [4, 8, 16, 24, 32]     # primary (MK-UNet) encoder width per stage + bottleneck
+  depths: [1, 1, 1, 1, 1]          # primary encoder depth per stage (5th entry unused by the auxiliary branch)
+  kernel_sizes: [1, 3, 5]          # primary encoder's MKDC kernel sizes
+  expansion_factor: 2
+
+  # Auxiliary VSS/PVM encoder (spec §6)
+  vss_depths: [1, 1, 1, 1]         # per-stage VSS block count (4 stages, matching the 4 skip resolutions)
+  d_state: 16
+  vss_expand: 2
+  scan_directions: 4               # 1 | 2 | 4 | 8 -- see models/auxiliary/ss2d.py's ASCII diagram
+  merge: "sum"                     # "sum" | "learned"
+  pvm_groups: 1
+  drop_path_rate: 0.1
+
+  # Fusion (spec §6)
+  fusion: "cbffm"                  # "cbffm" | "concat" | "add" | "xattn" | "none"
+  # fuse_stages: [1, 2, 3, 4]      # default: fuse at every stage
+
+  # Decoder (spec §6)
+  skip_policy: "fused"             # "primary_only" | "fused" | "both_concat"

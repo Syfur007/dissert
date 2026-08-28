@@ -87,7 +87,32 @@ def seed_everything(seed: int, deterministic: bool = True) -> Callable[[int], No
 
 def reset_recorded_nondeterminism() -> None:
     _NONDETERMINISM_LOG.clear()
+    _MANIFEST_EXTRAS.clear()
 
 
 def get_recorded_nondeterminism() -> List[str]:
     return list(_NONDETERMINISM_LOG)
+
+
+# ---------------------------------------------------------------------------
+# Manifest side-channel: facts discovered deep inside model/training
+# construction (e.g. models/proposed/mamba_unet.py's `scan_impl` — which
+# selective-scan implementation actually ran) that need to reach
+# orchestration.manifest, but aren't known to orchestration/runner.py
+# itself and can't easily change train.run_training()'s return type (it
+# returns a bare float — the monitored metric — and that signature is
+# depended on by search.py and existing call sites). Reuses this module's
+# existing per-run reset point (reset_recorded_nondeterminism(), called at
+# the start of every run) rather than adding a second reset call every
+# caller has to remember.
+# ---------------------------------------------------------------------------
+
+_MANIFEST_EXTRAS: dict = {}
+
+
+def record_manifest_extra(key: str, value) -> None:
+    _MANIFEST_EXTRAS[key] = value
+
+
+def get_recorded_manifest_extras() -> dict:
+    return dict(_MANIFEST_EXTRAS)

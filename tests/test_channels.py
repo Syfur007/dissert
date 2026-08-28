@@ -76,6 +76,13 @@ def test_val_test_no_augment():
     train_outs = [np.asarray(train_tf(image=image, mask=mask)["image"]) for _ in range(8)]
     assert any(not np.array_equal(train_outs[0], o) for o in train_outs[1:])
 
+    # Literal spec §19 wording: "Val/test transform pipeline contains only
+    # resize + normalise" — not just "happens to be deterministic" (a
+    # pipeline with, say, a fixed-seed augmentation op would also pass the
+    # determinism check above without satisfying this).
+    val_op_names = [type(t).__name__ for t in val_tf.transforms]
+    assert val_op_names == ["Resize", "Normalize", "ToTensorV2"], val_op_names
+
 
 # ---------------------------------------------------------------------------
 # test_mask_interpolation

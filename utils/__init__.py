@@ -1,11 +1,7 @@
 from .logger import setup_logger, TensorBoardTracker
 from .early_stopping import EarlyStopping
 from .checkpoint import CheckpointManager, atomic_torch_save
-from .metrics import (
-    count_parameters,
-    measure_throughput,
-    log_model_summary,
-)
+from .metrics import count_parameters
 from .report import (
     EvaluationReporter,
     get_model_memory_size,
@@ -32,10 +28,8 @@ __all__ = [
     "CheckpointManager",
     "atomic_torch_save",
     "EarlyStopping",
-    # profiling (utils/metrics.py — Phase 10 will relocate these to profiling/)
+    # profiling — see profiling/ (Phase 10) for FLOPs/latency/memory/export
     "count_parameters",
-    "measure_throughput",
-    "log_model_summary",
     # report
     "EvaluationReporter",
     "get_model_memory_size",

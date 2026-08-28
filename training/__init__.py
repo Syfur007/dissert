@@ -13,7 +13,7 @@ Public surface:
 """
 
 from .trainer import Trainer
-from .losses import get_loss
+from losses import get_loss  # moved out of training/ into a top-level package (Phase 7)
 from .optimizers import build_optimizer, build_scheduler
 from .callbacks import Callback, PeriodicCheckpointCallback, TensorBoardCallback
 from .ema import EMA

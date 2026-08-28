@@ -69,6 +69,13 @@ statsmodels
 # selective-scan counter hooks into).
 fvcore
 
+# Phase 10: profiling/export.py's ONNX export path (torch.onnx.export needs
+# this installed to fully serialise). TensorRT is attempted only if the
+# separate, GPU-vendor-specific `tensorrt` package happens to be installed —
+# not pinned here; its absence is a legitimate, reportable export failure
+# (spec §14: "Failure is a reportable result, not a blocker"), not an error.
+onnx
+
 # Phase 11: attribution/explainability (occlusion, integrated gradients).
 captum
 

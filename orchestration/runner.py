@@ -25,7 +25,11 @@ from .ledger import LedgerWriter
 from .manifest import build_manifest
 from .runid import config_hash as compute_config_hash
 from .runid import run_id as compute_run_id
-from training.determinism import get_recorded_nondeterminism, reset_recorded_nondeterminism
+from training.determinism import (
+    get_recorded_manifest_extras,
+    get_recorded_nondeterminism,
+    reset_recorded_nondeterminism,
+)
 
 TrainFn = Callable[..., float]
 
@@ -113,6 +117,8 @@ def run_sweep(
             finally:
                 for note in get_recorded_nondeterminism():
                     manifest.record_nondeterminism(note)
+                for key, value in get_recorded_manifest_extras().items():
+                    manifest.record(key, value)
                 manifest.finish(status=status, error=error)
                 manifest.save(mpath)
 

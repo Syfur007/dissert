@@ -108,45 +108,28 @@ def get_model_memory_size(model: nn.Module) -> int:
 
 
 def get_latency_stats(model: nn.Module, input_shape: tuple, device: torch.device,
-                      n_runs: int = 50) -> dict:
+                      n_runs: int = 200) -> dict:
     """
-    Measure single-sample inference latency statistics (mean, median, std, p95).
+    Single-sample (batch=1) inference latency statistics (mean, median,
+    std, p95) — delegates to profiling.latency.measure_latency (Phase 10),
+    spec §14's protocol: >=50 warm-up iterations, explicit cuda.synchronize,
+    median of >=200 timed runs. Superseded this function's own former
+    10-warmup/50-run loop, which met neither minimum.
 
     Args:
         model:       Evaluated model (already on `device`).
         input_shape: (C, H, W) — single sample shape.
         device:      Target device.
-        n_runs:      Number of repeated forward passes.
+        n_runs:      Number of timed runs (must be >=200 — see
+            profiling.latency.measure_latency).
 
     Returns:
         dict: mean_ms, median_ms, std_ms, p95_ms
     """
-    model.eval()
-    dummy = torch.randn(1, *input_shape).to(device)
-    latencies = []
+    from profiling.latency import measure_latency
 
-    with torch.no_grad():
-        # Warm-up
-        for _ in range(10):
-            _ = model(dummy)
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-
-        for _ in range(n_runs):
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            _ = model(dummy)
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            latencies.append((time.perf_counter() - t0) * 1000)  # ms
-
-    return {
-        "mean_ms":   float(np.mean(latencies)),
-        "median_ms": float(np.median(latencies)),
-        "std_ms":    float(np.std(latencies)),
-        "p95_ms":    float(np.percentile(latencies, 95)),
-    }
+    result = measure_latency(model, input_shape, device, batch_size=1, num_warmup=50, num_runs=n_runs)
+    return {k: result[k] for k in ("mean_ms", "median_ms", "std_ms", "p95_ms")}
 
 
 def get_gpu_memory_usage(device: torch.device) -> dict:
@@ -251,9 +234,9 @@ class EvaluationReporter:
 
         Args:
             model:           The evaluated model (nn.Module).
-            flops:           Pre-computed FLOPs (from get_flops_and_params).
+            flops:           Pre-computed FLOPs (from profiling.flops.check_flops_agreement).
             params:          Pre-computed parameter count.
-            throughput:      Throughput in images/sec (from measure_throughput).
+            throughput:      Throughput in images/sec (from profiling.latency.measure_latency).
             checkpoint_path: Path to the loaded checkpoint file.
             measure_latency: If True, run a latency benchmark (adds ~5 sec).
         """

@@ -38,15 +38,16 @@ from training.callbacks import (
     TrainingCurvePlotCallback,
 )
 from orchestration.runid import config_hash, run_id as compute_run_id
+from profiling.flops import FlopsAgreementError, check_flops_agreement
 from training.determinism import reset_recorded_nondeterminism, seed_everything
-from training.losses import get_loss
+from losses import get_loss
 from training.optimizers import build_optimizer, build_scheduler
+from utils.metrics import count_parameters
 from utils import (
     CheckpointManager,
     EarlyStopping,
     TensorBoardTracker,
     setup_logger,
-    log_model_summary,
 )
 
 
@@ -113,13 +114,52 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     model_cfg = config["model"]
     model     = get_model(**model_cfg).to(device)
 
-    input_shape = (1, model_cfg["in_channels"], dataset_cfg["img_height"], dataset_cfg["img_width"])
-    # model_summary.txt lands inside the experiment subdir
-    log_model_summary(model, input_shape, logger, log_dir=exp_log_dir)
+    # Which selective-scan implementation a Mamba-family model actually
+    # ran on (mamba_ssm fused kernel vs. ss2d_ref pure-PyTorch fallback —
+    # see models/auxiliary/ss2d.py) — surfaced to orchestration/runner.py
+    # via training.determinism's manifest side-channel, since this
+    # function's return type (a bare float) can't carry it directly.
+    # Absent for every non-SSM model family (they don't define scan_impl).
+    if hasattr(model, "scan_impl"):
+        from training.determinism import record_manifest_extra
+        record_manifest_extra("scan_impl", model.scan_impl)
+        logger.info(f"Selective-scan implementation: {model.scan_impl}")
+
+    # Profile complexity: analytic FLOPs (fvcore-agreement-checked, Phase 10 —
+    # profiling/flops.py) + trainable param count. A disagreement is a real
+    # correctness signal worth surfacing at training startup, not something
+    # to abort the run over — logged as a warning, training proceeds.
+    input_shape = (model_cfg["in_channels"], dataset_cfg["img_height"], dataset_cfg["img_width"])
+    params = count_parameters(model)
+    try:
+        flops_result = check_flops_agreement(model, input_shape, tolerance=0.05)
+        logger.info(
+            f"Model Complexity | FLOPs: {flops_result['reported_total']:,} "
+            f"(analytic/fvcore rel. error {flops_result['relative_error']:.1%}) | Params: {params:,}"
+        )
+    except FlopsAgreementError as exc:
+        logger.warning(f"FLOPs agreement check failed: {exc}")
 
     # ── Loss ───────────────────────────────────────────────────────────
-    loss_kwargs = training_cfg.get("loss_kwargs", {}) or {}
-    criterion   = get_loss(
+    loss_kwargs = dict(training_cfg.get("loss_kwargs", {}) or {})
+    if training_cfg["loss_type"] == "compound":
+        # Bridge the schema's structured training.loss_terms (a list of
+        # {name, weight, schedule} dicts — orchestration/schema.py's
+        # LossTermConfig, validated there including the redundancy guard)
+        # into get_loss("compound", ...)'s term_list kwarg (a list of
+        # (name, weight, schedule) tuples — losses/compound.py's
+        # CompoundLoss constructor). Kept as a small translation here
+        # rather than making CompoundLoss itself accept the dict shape, so
+        # CompoundLoss's own signature stays plain-Python (usable directly
+        # from a notebook/script without going through the config schema).
+        loss_terms = training_cfg.get("loss_terms") or []
+        loss_kwargs.setdefault(
+            "term_list",
+            [(t["name"], t["weight"], t.get("schedule")) for t in loss_terms],
+        )
+        if training_cfg.get("loss_term_kwargs"):
+            loss_kwargs.setdefault("term_kwargs", training_cfg["loss_term_kwargs"])
+    criterion = get_loss(
         training_cfg["loss_type"],
         num_classes=model_cfg["out_channels"],
         **loss_kwargs,

@@ -189,7 +189,7 @@ def test_rolling_tracks_canonical_at_epoch_end(tiny_config_factory):
     from loguru import logger as _logger
     from models import get_model
     from training import Trainer
-    from training.losses import get_loss
+    from losses import get_loss
     from training.optimizers import build_optimizer, build_scheduler
     from utils import CheckpointManager
 

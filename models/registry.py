@@ -82,4 +82,5 @@ from .baseline.attention_unet import AttentionUNet
 from .baseline.mk_unet import MK_UNet, MK_UNet_S, MK_UNet_T
 from .baseline.emcad import EMCADNet
 from .proposed.gmk_unet import GMK_UNet
+from .proposed.mamba_unet import MambaUNet
 

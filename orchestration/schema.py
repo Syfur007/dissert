@@ -32,7 +32,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional, Type
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from losses.compound import REDUNDANT_TERM_FAMILIES
 
 
 class _Strict(BaseModel):
@@ -168,6 +170,20 @@ class MultiScaleConfig(_Strict):
     mode: Literal["all_scales", "random"] = "all_scales"
 
 
+class LossScheduleConfig(BaseModel):
+    """Permissive (unlike every other section here): schedule kwargs vary
+    by `type` (linear's start/end vs. constant's value) — see
+    losses/schedules.py's SCHEDULES."""
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    type: Literal["linear", "constant"] = "constant"
+
+
+class LossTermConfig(_Strict):
+    name: str
+    weight: float = 1.0
+    schedule: Optional[LossScheduleConfig] = None
+
+
 class TrainingConfig(_Strict):
     epochs: int
     lr: float
@@ -190,6 +206,16 @@ class TrainingConfig(_Strict):
     loss_type: str = "structure"
     loss_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
+    # Only meaningful when loss_type == "compound" (losses/compound.py's
+    # CompoundLoss escape hatch for a fully custom term list) — every
+    # preset loss_type ("combo", "structure", ...) ignores these.
+    loss_terms: Optional[List[LossTermConfig]] = None
+    loss_term_kwargs: Optional[Dict[str, Dict[str, Any]]] = None
+    # Required (non-empty) when loss_terms stacks two terms from the same
+    # REDUNDANT_TERM_FAMILIES group (e.g. dice + tversky) — see the
+    # validator below. Phase 7's redundancy guard.
+    loss_override_reason: Optional[str] = None
+
     device: Literal["cuda", "cpu"] = "cuda"
     seed: int = 42
     amp: bool = True
@@ -202,6 +228,51 @@ class TrainingConfig(_Strict):
 
     ema: EMAConfig = Field(default_factory=EMAConfig)
     multi_scale: Optional[MultiScaleConfig] = None
+
+    @model_validator(mode="after")
+    def _reject_redundant_loss_terms_without_override(self) -> "TrainingConfig":
+        """Phase 7's redundancy guard (spec §7: "Config validation rejects
+        dice and iou together (monotonically related) unless explicitly
+        overridden"). Generalised to every family in
+        losses.compound.REDUNDANT_TERM_FAMILIES (currently {dice, tversky}
+        — this repo has no separate "iou" loss term; Tversky at
+        alpha=beta=0.5 *is* Dice, the same "monotonically related"
+        relationship the spec's dice/iou example describes).
+        """
+        if not self.loss_terms:
+            return self
+        names = {t.name for t in self.loss_terms}
+        for family in REDUNDANT_TERM_FAMILIES:
+            overlap = names & family
+            if len(overlap) > 1 and not self.loss_override_reason:
+                raise ValueError(
+                    f"training.loss_terms stacks {sorted(overlap)} — monotonically "
+                    "related region-overlap loss terms (see "
+                    "losses.compound.REDUNDANT_TERM_FAMILIES) — without an explicit "
+                    "training.loss_override_reason. Set that field (a short note on "
+                    "why, e.g. a deliberate ensemble/ablation) or remove one term."
+                )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# stats (Phase 9, stats/__init__.py's run_family_comparison)
+# ---------------------------------------------------------------------------
+
+class StatsConfig(_Strict):
+    """Declares this experiment's significance-testing family *before* any
+    result is seen — spec §10's correction requirement only holds if the
+    family (which comparisons get Holm-Bonferroni-corrected together) is
+    fixed in advance, not assembled after looking at which comparisons came
+    out significant. Optional: most experiment configs (a single training
+    run) have no comparison to declare; a config that will feed
+    stats.run_family_comparison() sets this so the family is on record
+    alongside the run it belongs to.
+    """
+    family: str
+    comparators: List[str] = Field(default_factory=list)
+    min_meaningful_diff: float = 0.01
+    alpha: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +329,7 @@ class Config(_Strict):
     early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     stages: List[StageConfig] = Field(default_factory=list)
     logging: LoggingConfig
+    stats: Optional[StatsConfig] = None
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +341,10 @@ class SearchMetaConfig(_Strict):
     num_trials: int = 5
     seed: int = 42
     output_dir: str = "search_results"
+    # Phase 14 (orchestration/sweep.py): spec §15's "sweep.py takes a
+    # search space and a trial budget" — required by sweep.py's CLI
+    # (num_trials alone is search.py's older, superseded stopping rule).
+    budget_gpu_hours: Optional[float] = None
 
 
 class SearchSweepConfig(_Strict):

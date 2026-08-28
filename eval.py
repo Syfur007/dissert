@@ -10,12 +10,13 @@ from metrics import compute_dataset_metrics
 from models import get_model
 from datasets import StandardSplitDataModule
 from datasets.splits import TestLoaderGuardError
+from profiling.flops import FlopsAgreementError, check_flops_agreement
+from profiling.latency import measure_latency
 from training.determinism import reset_recorded_nondeterminism, seed_everything
 from utils.config import load_config
+from utils.metrics import count_parameters
 from utils import (
     setup_logger,
-    log_model_summary,
-    measure_throughput,
     EvaluationReporter,
     save_confusion_matrix,
     save_roc_curve,
@@ -26,7 +27,7 @@ from utils import (
 class EnsembleModel(nn.Module):
     """
     Wraps a list of fold models behind a single nn.Module so that the rest of
-    the pipeline (evaluate, get_flops_and_params, measure_throughput) can treat
+    the pipeline (evaluate, check_flops_agreement, measure_latency) can treat
     an ensemble exactly like a single model. This guarantees that FLOPs, param
     counts, and throughput all reflect the *full* cost of running every fold
     model per inference, instead of just one fold's cost.
@@ -148,12 +149,21 @@ def main():
     parser.add_argument("--allow-test-eval", action="store_true",
                         help="Mint a fresh test-evaluation token for this run (records a "
                              "Test_Evals ledger row) instead of requiring a pre-minted --test-token.")
+    parser.add_argument("--experiment-name", type=str, default=None,
+                        help="Override logging.experiment_name (and therefore both the log dir "
+                             "and, unless --checkpoint is given explicitly, the checkpoint "
+                             "lookup dir) from the config. Lets a caller (e.g. "
+                             "scripts/reproduce.sh) point a run at a scoped name instead of "
+                             "silently reusing — and overwriting the logs/report.json of — "
+                             "whatever real experiment already used the config's own name.")
     args = parser.parse_args()
 
     config = load_config(args.config)
 
     if args.dataset_dir is not None:
         config['dataset']['root'] = args.dataset_dir
+    if args.experiment_name is not None:
+        config['logging']['experiment_name'] = args.experiment_name
 
     training_cfg = config['training']
     dataset_cfg  = config['dataset']
@@ -260,13 +270,24 @@ def main():
         model = load_checkpoint_into(model, chk_path, device, logger)
         loaded_checkpoint_paths = chk_path
 
-    # Profile complexity — also writes model_summary.txt into exp_log_dir
-    input_shape = (1, model_cfg['in_channels'], dataset_cfg['img_height'], dataset_cfg['img_width'])
-    flops, params = log_model_summary(model, input_shape, logger, log_dir=exp_log_dir)
+    # Profile complexity: analytic FLOPs (fvcore-agreement-checked, Phase 10 —
+    # profiling/flops.py) + trainable param count. A disagreement is a real
+    # correctness signal (see that module's docstring), not blocked on here —
+    # eval.py still reports whatever FLOPs figure the check did compute, with
+    # a clear warning, rather than aborting evaluation over a profiling gap.
+    input_shape = (model_cfg['in_channels'], dataset_cfg['img_height'], dataset_cfg['img_width'])
+    params = count_parameters(model)
+    try:
+        flops_result = check_flops_agreement(model, input_shape, tolerance=0.05)
+        flops = flops_result["reported_total"]
+    except FlopsAgreementError as exc:
+        logger.warning(f"FLOPs agreement check failed: {exc}")
+        flops = 0
 
-    # Measure evaluation throughput
+    # Measure evaluation throughput (batch=1, spec §14 protocol: >=50
+    # warm-up, >=200 timed runs — profiling/latency.py)
     logger.info("Measuring inference throughput...")
-    throughput = measure_throughput(model, test_loader, device)
+    throughput = measure_latency(model, input_shape, device, batch_size=1, num_warmup=50, num_runs=200)["throughput_ips"]
 
     # Build reporter early (latency measured before the eval loop)
     reporter = EvaluationReporter(config, args, logger)

@@ -243,18 +243,20 @@ def test_test_loader_guard(tiny_config):
 
 def test_sweep_cannot_see_test():
     """Static guarantee: nothing on the training/sweep path can reach the
-    guarded test loader — train.py, training/trainer.py, search.py, and
-    orchestration/runner.py must contain zero references to
-    get_test_loader. (eval.py and datasets/datamodule.py are the only two
-    legitimate references — the guard's definition and its one guarded call
-    site.) A grep-able static fact, not a runtime behaviour, but exactly
-    what Phase 14's later "re-verified static-import guarantee" builds on.
+    guarded test loader — train.py, training/trainer.py, search.py,
+    orchestration/runner.py, and orchestration/sweep.py must contain zero
+    references to get_test_loader. (eval.py and datasets/datamodule.py are
+    the only two legitimate references — the guard's definition and its
+    one guarded call site.) A grep-able static fact, not a runtime
+    behaviour — Phase 14's "re-verified static-import guarantee" for
+    orchestration/sweep.py (search.py's budget-aware successor, spec §15).
     """
     sweep_path_files = [
         "train.py",
         "training/trainer.py",
         "search.py",
         "orchestration/runner.py",
+        "orchestration/sweep.py",
     ]
     for rel_path in sweep_path_files:
         source = (REPO_ROOT / rel_path).read_text()

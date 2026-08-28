@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      # CPU wheels — a standard GitHub-hosted runner has no GPU/CUDA, and
+      # the pinned CUDA build (see requirements.txt's top comment block)
+      # only exists as a wheel on PyTorch's own cu11x/cu12x index anyway.
+      - name: Install torch/torchvision (CPU)
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu \
+            torch==1.13.1 torchvision==0.14.1
+
+      # mamba-ssm/causal-conv1d (Phase 6's fused-kernel path) are CUDA
+      # extensions with no prebuilt wheel on PyPI — pip would try to build
+      # them from source, which needs nvcc + a matching CUDA toolkit that
+      # doesn't exist on this runner (see requirements.txt's comment block
+      # and CHANGELOG.md's Phase 0 entry, which hit exactly this locally).
+      # The test suite only needs models/auxiliary/ss2d_ref.py's
+      # pure-PyTorch fallback, which needs neither package — excluded here
+      # rather than left to fail the whole install.
+      - name: Install the rest of requirements.txt
+        run: |
+          grep -v -E '^(torch|torchvision|mamba-ssm|causal-conv1d)==' requirements.txt \
+            > /tmp/ci-requirements.txt
+          pip install -r /tmp/ci-requirements.txt
+
+      - name: pip check
+        run: pip check
+
+      - name: Run test suite
+        run: pytest tests/ -v

@@ -195,6 +195,15 @@ class Trainer:
         for epoch in range(start_epoch, end_epoch + 1):
             self._call("on_epoch_start", epoch)
 
+            # Schedule-driven compound-loss term weights (e.g. the boundary
+            # loss's linear ramp — spec §7) need to know where training is;
+            # every criterion built via losses.get_loss() is a CompoundLoss
+            # and has this method, but the hasattr guard keeps a
+            # hand-constructed bare nn.Module criterion (e.g. in a test)
+            # working too.
+            if hasattr(self.criterion, "set_epoch"):
+                self.criterion.set_epoch(epoch, end_epoch)
+
             train_loss, train_dice, train_iou = self.train_one_epoch(epoch)
             val_metrics = self._run_validate()
 

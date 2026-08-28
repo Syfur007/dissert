@@ -1,0 +1,12 @@
+# Mamba-UNet (tiny) on ClinicDB — composes the shared base config, the
+# ClinicDB dataset identity, and the tiny model-size fragment; only
+# per-experiment overrides (batch size, run name) are listed here. See
+# ../../base.yaml for every inherited default (early stopping, EMA,
+# augmentation, checkpointing).
+compose: ["../../base.yaml", "../../dataset/clinicdb.yaml", "../../model/mamba/t.yaml"]
+
+dataset:
+  batch_size: 16
+
+logging:
+  experiment_name: "mamba_t_clinicdb"
