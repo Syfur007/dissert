@@ -62,8 +62,24 @@ def selective_scan_ref(
     d_state = A.shape[1]
     dtype = u.dtype
 
+    # Match mamba-ssm's own selective_scan_ref: run the recurrence in
+    # float32 regardless of input dtype, then cast the result back. Without
+    # this, an AMP/autocast training run (this project's default —
+    # orchestration/schema.py's `amp: bool = True`) would accumulate `h`
+    # sequentially over H*W steps in fp16, which is the precision loss this
+    # upcast exists to avoid.
+    u = u.float()
+    delta = delta.float()
+    A = A.float()
+    B = B.float()
+    C = C.float()
+    if D is not None:
+        D = D.float()
+    if z is not None:
+        z = z.float()
+
     if delta_bias is not None:
-        delta = delta + delta_bias[None, :, None]
+        delta = delta + delta_bias[None, :, None].float()
     if delta_softplus:
         delta = F.softplus(delta)
 
