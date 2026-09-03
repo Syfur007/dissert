@@ -41,9 +41,8 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 SEEDS="${SEEDS:-42 43 44}"
 MODEL_CONFIG="${MODEL_CONFIG:-configs/experiment/gmkunet/gmkunet_t_clinicdb.yaml}"
 EPOCHS="${EPOCHS:-1}"
-LEDGER_DIR="${LEDGER_DIR:-artifacts/ledger}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
-REPORTS_DIR="${REPORTS_DIR:-reports}"
+LEDGER_DIR="${LEDGER_DIR:-outputs/ledger}"
+REPORTS_DIR="${REPORTS_DIR:-outputs/reports}"
 SNAPSHOT_ID="${SNAPSHOT_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 echo "=============================================================="
@@ -59,15 +58,15 @@ echo "   construction happens inline in the dataset pipeline)"
 echo "=============================================================="
 pytest tests/test_channels.py -q
 
-# Every run below uses a *per-seed, scoped* experiment name
-# (<original>_reproduce_<snapshot>_s<seed>), never the config's own bare
-# experiment_name, for two reasons confirmed the hard way while building
-# this script: (1) reusing the bare name overwrote an existing real run's
-# logs/<name>/report.json with the smoke run's own; (2)
-# utils.checkpoint.CheckpointManager's save directory is keyed only by
-# experiment_name, not seed — training multiple seeds under one shared
-# name would have each overwrite the previous seed's checkpoint before it
-# was ever evaluated.
+# Every run below uses a *scoped* experiment name
+# (<original>_reproduce_<snapshot>), never the config's own bare
+# experiment_name — confirmed the hard way while building this script:
+# reusing the bare name overwrote an existing real run's
+# outputs/experiments/<name>-s<seed>/eval/report.json with the smoke
+# run's own. Seed no longer needs manually folding into the name — it's
+# already part of the on-disk experiment_id ("{experiment_name}-s{seed}",
+# see orchestration/runid.py), so each seed below lands in its own
+# directory automatically.
 BASE_EXP_NAME="$(python3 -c "from utils.config import load_config; print(load_config('$MODEL_CONFIG')['logging']['experiment_name'])")"
 REPRODUCE_TAG="${BASE_EXP_NAME}_reproduce_${SNAPSHOT_ID}"
 
@@ -76,14 +75,14 @@ echo "=============================================================="
 echo "S3/S4/S6 Sanity training / baseline repro / main comparison"
 echo "   — reduced to ${EPOCHS} epoch(s), seed(s): ${SEEDS}, on"
 echo "   ${MODEL_CONFIG}, via orchestration.runner.run_sweep"
-echo "   scoped experiment name: ${REPRODUCE_TAG}_s<seed>"
+echo "   scoped experiment name: ${REPRODUCE_TAG} (outputs/experiments/${REPRODUCE_TAG}-s<seed>/)"
 echo "=============================================================="
-python3 - "$MODEL_CONFIG" "$EPOCHS" "$LEDGER_DIR" "$ARTIFACTS_DIR" "$SEEDS" "$REPRODUCE_TAG" <<'PYEOF'
+python3 - "$MODEL_CONFIG" "$EPOCHS" "$LEDGER_DIR" "$SEEDS" "$REPRODUCE_TAG" <<'PYEOF'
 import sys
 from utils.config import load_config
 from orchestration.runner import run_sweep
 
-model_config, epochs, ledger_dir, artifacts_dir, seeds_str, tag = sys.argv[1:7]
+model_config, epochs, ledger_dir, seeds_str, tag = sys.argv[1:6]
 seeds = [int(s) for s in seeds_str.split()]
 
 for seed in seeds:
@@ -91,9 +90,9 @@ for seed in seeds:
     config["training"]["epochs"] = int(epochs)
     config["k_fold"]["enabled"] = False
     config["checkpoint"]["resume"] = False
-    config["logging"]["experiment_name"] = f"{tag}_s{seed}"
+    config["logging"]["experiment_name"] = tag
 
-    results = run_sweep(config, seeds=[seed], artifacts_dir=artifacts_dir, ledger_dir=ledger_dir)
+    results = run_sweep(config, seeds=[seed], ledger_dir=ledger_dir)
     for r in results:
         print(f"  run_id={r['run_id']} status={r['status']} best_metric={r['best_metric']}")
     failed = [r for r in results if r["status"] not in ("done", "skipped-done")]
@@ -148,10 +147,10 @@ echo "=============================================================="
 echo "S15 External — guarded one-time test evaluation via eval.py,"
 echo "   once per seed's checkpoint (no --fold: S6 above ran with"
 echo "   k_fold disabled, so each seed's checkpoint is"
-echo "   checkpoints/<name>/best.pth, not a per-fold file)"
+echo "   outputs/experiments/${REPRODUCE_TAG}-s<seed>/checkpoints/best.pth)"
 echo "=============================================================="
 for seed in $SEEDS; do
-    python3 eval.py --config "$MODEL_CONFIG" --experiment-name "${REPRODUCE_TAG}_s${seed}" --allow-test-eval
+    python3 eval.py --config "$MODEL_CONFIG" --experiment-name "$REPRODUCE_TAG" --seed "$seed" --allow-test-eval
 done
 
 echo ""
@@ -167,10 +166,10 @@ echo "=============================================================="
 echo "S17 Reporting — render manuscript tables from eval.py's JSON dumps"
 echo "=============================================================="
 python3 scripts/generate_report.py \
-    --reports-glob "logs/${REPRODUCE_TAG}_s*/*report.json" \
+    --reports-glob "outputs/experiments/${REPRODUCE_TAG}-s*/eval/report.json" \
     --ledger-dir "$LEDGER_DIR" \
-    --out-dir "$REPORTS_DIR/tables" \
+    --out-dir "$REPORTS_DIR" \
     --snapshot-id "$SNAPSHOT_ID"
 
 echo ""
-echo "Done. Tables written to ${REPORTS_DIR}/tables/."
+echo "Done. Tables written to ${REPORTS_DIR}/."

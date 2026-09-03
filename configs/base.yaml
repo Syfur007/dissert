@@ -119,13 +119,17 @@ training:
     enabled: false
     decay: 0.9999
 
+# Root of every experiment's output tree: outputs/experiments/<experiment_name>-s<seed>/
+# holds that (experiment, seed)'s checkpoints/, logs/, tensorboard/, plots/,
+# eval/ — see orchestration/runid.py:experiment_paths().
+output_dir: "outputs/experiments"
+
 k_fold:
   enabled: true           # Set to true to run K-Fold cross validation
   n_splits: 5              # Number of folds
   run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
 
 checkpoint:
-  save_dir: "checkpoints"
   resume: true
   checkpoint_path: ""      # Path to load checkpoint for resume or eval
   monitor_metric: "val_dice" # Metric to monitor for best model ("val_dice", "val_miou", "val_loss")
@@ -156,8 +160,6 @@ stages: []                    # empty list = use legacy training.epochs / traini
 
 
 logging:
-  log_dir: "logs"
-  tb_dir: "runs"           # TensorBoard event log directory
   experiment_name: "clinicdb_unet"
   log_interval: 10         # Print/log training progress every N batches
 

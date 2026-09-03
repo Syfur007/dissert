@@ -44,6 +44,7 @@ from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
 from .busi import BUSI
 from .isic18 import ISIC18
+from orchestration.runid import experiment_paths
 
 _MODEL_STRIDE = 32
 
@@ -276,7 +277,7 @@ class StandardSplitDataModule(BaseDataModule):
         val_ds   = self.handler.get_dataset("val",   self._val_tf,   **self._ds_kwargs)
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
 
-    def get_test_loader(self, token: str, ledger_dir: str = "artifacts/ledger"):
+    def get_test_loader(self, token: str, ledger_dir: str = "outputs/ledger"):
         """Return the test DataLoader, or ``None`` if no test samples exist.
 
         Raises ``datasets.splits.TestLoaderGuardError`` unless *token* was
@@ -294,9 +295,10 @@ class KFoldDataModule(BaseDataModule):
     """
     Data module for k-fold cross-validation.
 
-    Fold assignments are serialised to ``<checkpoint_dir>/<exp>/fold_splits.json``
-    on the first call to ``get_fold_loaders`` and reloaded on subsequent calls,
-    so resumed runs always use the same split.
+    Fold assignments are serialised to
+    ``outputs/experiments/<experiment_name>-s<seed>/fold_splits.json`` on the
+    first call to ``get_fold_loaders`` and reloaded on subsequent calls, so
+    resumed runs always use the same split.
 
     CAUTION — frame-level splitting, no video/sequence grouping:
     Folds are drawn from ``sklearn.model_selection.KFold`` over individual
@@ -330,8 +332,8 @@ class KFoldDataModule(BaseDataModule):
         self.kf_cfg  = config.get("k_fold", {})
 
         exp_name        = config.get("logging", {}).get("experiment_name", "experiment")
-        save_dir        = config.get("checkpoint", {}).get("save_dir", "checkpoints")
-        self._fold_file = os.path.join(save_dir, exp_name, "fold_splits.json")
+        output_dir      = config.get("output_dir", "outputs/experiments")
+        self._fold_file = experiment_paths(output_dir, exp_name, self._seed)["fold_splits"]
 
     def _load_or_create_fold_splits(self) -> list:
         """
@@ -398,7 +400,7 @@ class KFoldDataModule(BaseDataModule):
         )
         return self._make_loader(train_ds, True), self._make_loader(val_ds, False)
 
-    def get_test_loader(self, token: str, ledger_dir: str = "artifacts/ledger"):
+    def get_test_loader(self, token: str, ledger_dir: str = "outputs/ledger"):
         """Return the test DataLoader, or ``None`` if no test samples exist.
 
         Raises ``datasets.splits.TestLoaderGuardError`` unless *token* was

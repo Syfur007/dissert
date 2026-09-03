@@ -79,15 +79,15 @@ class CheckpointManager:
         if scaler is not None:
             state['scaler_state'] = scaler.state_dict()
 
-        fold_suffix = f"_fold{fold}" if fold is not None else ""
-
-        # Save latest epoch checkpoint
-        last_path = os.path.join(self.save_dir, f"last{fold_suffix}.pth")
+        # save_dir is already fold-scoped by the caller (see
+        # orchestration/runid.py:experiment_paths()) — no fold suffix needed
+        # in the filename itself.
+        last_path = os.path.join(self.save_dir, "last.pth")
         atomic_torch_save(state, last_path)
 
         if is_best:
             self.best_metric = metric_val
-            best_path = os.path.join(self.save_dir, f"best{fold_suffix}.pth")
+            best_path = os.path.join(self.save_dir, "best.pth")
             atomic_torch_save(state, best_path)
             logger.info(f"Saved new best model checkpoint to {best_path} with {self.monitor_metric}: {metric_val:.4f}")
         else:

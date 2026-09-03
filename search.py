@@ -117,7 +117,7 @@ def main():
     method = search_cfg.get('method', 'grid')
     num_trials = search_cfg.get('num_trials', 5)
     search_seed = search_cfg.get('seed', 42)
-    output_dir = search_cfg.get('output_dir', 'search_results')
+    output_dir = search_cfg.get('output_dir', 'outputs/searches/search')
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate full Cartesian search space
@@ -167,12 +167,13 @@ def main():
         trial_name = f"trial_{idx+1}_" + "_".join(param_desc)
         print(f"Trial Parameters: {', '.join(param_desc)}")
         
-        # Override experiment name, log dir, and save dirs for this trial
+        # Each trial is a first-class experiment: trial_name becomes its
+        # experiment_name, so it lands at its own
+        # outputs/experiments/{trial_name}-s{seed}/ (via the inherited
+        # top-level output_dir default) — no separate log/checkpoint tree
+        # for search.py to maintain.
         trial_config['logging']['experiment_name'] = trial_name
-        trial_config['logging']['log_dir'] = os.path.join(output_dir, "logs")
-        trial_config['logging']['tb_dir'] = os.path.join(output_dir, "runs")
-        trial_config['checkpoint']['save_dir'] = os.path.join(output_dir, "checkpoints")
-        
+
         # Disable K-Fold during search to keep individual trial times short
         trial_config['k_fold']['enabled'] = False
 

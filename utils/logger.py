@@ -3,33 +3,25 @@ import sys
 from loguru import logger
 
 
-def setup_logger(log_dir: str, experiment_name: str, log_filename: str = ""):
-    """Set up Loguru logger to log to console and a per-experiment log file.
+def setup_logger(log_dir: str, log_filename: str):
+    """Set up Loguru logger to log to console and a file inside *log_dir*.
 
-    The experiment directory is always ``{log_dir}/{experiment_name}/``.
-    The log file inside is ``{log_filename}.log`` when *log_filename* is
-    provided, falling back to ``{experiment_name}.log``.
+    *log_dir* is the already-fully-resolved directory to log into (the
+    ``logs`` entry of ``orchestration.runid.experiment_paths()``) — this
+    function does no further path construction beyond the filename itself.
+    All folds and eval runs share one *log_dir* with distinct filenames:
 
-    This separation lets all folds, eval runs, and summaries share the same
-    parent directory while keeping their log files distinct:
-
-        logs/my_experiment/
+        outputs/experiments/my_experiment-s42/logs/
             fold0.log
             fold1.log
             eval.log
-            model_summary.txt
-            overlays/
-            plots/
 
     Returns:
-        (logger, exp_log_dir) — the configured Loguru logger and the
-        experiment-specific directory path.
+        (logger, log_dir) — the configured Loguru logger and the directory
+        path (returned for convenience, same value as the *log_dir* input).
     """
-    exp_log_dir = os.path.join(log_dir, experiment_name)
-    os.makedirs(exp_log_dir, exist_ok=True)
-
-    fname    = log_filename if log_filename else experiment_name
-    log_file = os.path.join(exp_log_dir, f"{fname}.log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"{log_filename}.log")
 
     # Configure loguru: remove default handler first
     logger.remove()
@@ -48,14 +40,16 @@ def setup_logger(log_dir: str, experiment_name: str, log_filename: str = ""):
         level="DEBUG",
         rotation="10 MB",
     )
-    return logger, exp_log_dir
+    return logger, log_dir
 
 
 class TensorBoardTracker:
     """Experiment tracker using PyTorch built-in TensorBoard or TensorBoardX."""
 
-    def __init__(self, tb_dir: str, experiment_name: str):
-        self.log_dir = os.path.join(tb_dir, experiment_name)
+    def __init__(self, log_dir: str):
+        """*log_dir* is the already-fully-resolved, fold-scoped tensorboard
+        directory (the ``tensorboard`` entry of ``experiment_paths()``)."""
+        self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
         try:
             from torch.utils.tensorboard import SummaryWriter

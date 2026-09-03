@@ -10,6 +10,7 @@ from metrics import compute_dataset_metrics
 from models import get_model
 from datasets import StandardSplitDataModule
 from datasets.splits import TestLoaderGuardError
+from orchestration.runid import experiment_paths
 from profiling.flops import FlopsAgreementError, check_flops_agreement
 from profiling.latency import measure_latency
 from training.determinism import reset_recorded_nondeterminism, seed_everything
@@ -156,6 +157,12 @@ def main():
                              "scripts/reproduce.sh) point a run at a scoped name instead of "
                              "silently reusing — and overwriting the logs/report.json of — "
                              "whatever real experiment already used the config's own name.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Override training.seed from the config. Since experiment_id is "
+                             "\"{experiment_name}-s{seed}\" (see orchestration.runid), this picks "
+                             "which seed's checkpoint/log/eval directory to evaluate — needed to "
+                             "evaluate anything but the config's own default seed, e.g. one "
+                             "particular seed of a multi-seed sweep.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -164,6 +171,8 @@ def main():
         config['dataset']['root'] = args.dataset_dir
     if args.experiment_name is not None:
         config['logging']['experiment_name'] = args.experiment_name
+    if args.seed is not None:
+        config['training']['seed'] = args.seed
 
     training_cfg = config['training']
     dataset_cfg  = config['dataset']
@@ -175,10 +184,16 @@ def main():
     reset_recorded_nondeterminism()
     seed_everything(training_cfg["seed"])
 
+    # ── Output layout ──────────────────────────────────────────────────
+    base_exp   = log_cfg['experiment_name']
+    output_dir = config.get("output_dir", "outputs/experiments")
+    # fold=None here: logs/ and eval/ are shared across all folds of this
+    # experiment (same as train.py) — only the checkpoint *read* path below
+    # is fold-scoped.
+    exp_paths = experiment_paths(output_dir, base_exp, training_cfg["seed"])
+
     # ── Logging ────────────────────────────────────────────────────────
-    base_exp     = log_cfg['experiment_name']
-    eval_name = "eval"
-    logger, exp_log_dir = setup_logger(log_cfg['log_dir'], base_exp, eval_name)
+    logger, exp_log_dir = setup_logger(exp_paths["logs"], "eval")
     logger.info(f"Using device: {device}")
     logger.info(f"Eval log dir: {exp_log_dir}")
 
@@ -224,8 +239,10 @@ def main():
     is_multiclass = model_cfg['out_channels'] > 1
     class_names   = dataset_cfg.get('class_names', None)
 
-    # Determine which checkpoints to load
-    checkpoint_dir = os.path.join(chk_cfg.get('save_dir', 'checkpoints'), log_cfg['experiment_name'])
+    # Determine which checkpoints to load. Checkpoints are fold-scoped
+    # (checkpoints/fold{N}/best.pth) — resolve per-fold below.
+    def _checkpoints_dir(fold=None):
+        return experiment_paths(output_dir, base_exp, training_cfg["seed"], fold)["checkpoints"]
 
     if args.ensemble:
         # Load all fold checkpoints for ensembling
@@ -235,7 +252,7 @@ def main():
         fold_models = []
         loaded_checkpoint_paths = []
         for f in range(n_splits):
-            fold_chk_path = os.path.join(checkpoint_dir, f"best_fold{f}.pth")
+            fold_chk_path = os.path.join(_checkpoints_dir(f), "best.pth")
             if os.path.exists(fold_chk_path):
                 model_f = get_model(**model_cfg).to(device)
                 model_f = load_checkpoint_into(model_f, fold_chk_path, device, logger)
@@ -256,11 +273,11 @@ def main():
         if args.checkpoint:
             chk_path = args.checkpoint
         elif args.fold is not None:
-            chk_path = os.path.join(checkpoint_dir, f"best_fold{args.fold}.pth")
+            chk_path = os.path.join(_checkpoints_dir(args.fold), "best.pth")
         else:
-            chk_path = os.path.join(checkpoint_dir, "best.pth")
+            chk_path = os.path.join(_checkpoints_dir(), "best.pth")
             if not os.path.exists(chk_path):
-                chk_path = os.path.join(checkpoint_dir, "best_fold0.pth")
+                chk_path = os.path.join(_checkpoints_dir(0), "best.pth")
 
         if not os.path.exists(chk_path):
             logger.error(f"Checkpoint file not found: {chk_path}")
@@ -330,7 +347,7 @@ def main():
 
     # ── Visualisations (confusion matrix, ROC, PR) ─────────────────────
     if not args.no_vis:
-        vis_dir = os.path.join(exp_log_dir, "curves")
+        vis_dir = os.path.join(exp_paths["eval"], "curves")
         os.makedirs(vis_dir, exist_ok=True)
 
         # Confusion matrix (from hard predictions)
@@ -380,7 +397,7 @@ def main():
 
     reporter.print_console()
     reporter.save(
-        report_dir      = exp_log_dir,
+        report_dir      = exp_paths["eval"],
         # filename_prefix = log_cfg['experiment_name'],
     )
 

@@ -2,7 +2,7 @@
 
 search:
   method: "grid"
-  output_dir: "search_test_results"
+  output_dir: "outputs/searches/search_test"
 
 grid:
   training:

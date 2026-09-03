@@ -36,7 +36,7 @@ def run_family_comparison(
     min_meaningful_diff: float = 0.01,
     alpha: float = 0.05,
     out_dir: Optional[str] = "reports/json/stats",
-    ledger_dir: Optional[str] = "artifacts/ledger",
+    ledger_dir: Optional[str] = "outputs/ledger",
 ) -> Dict[str, Any]:
     """
     Args:

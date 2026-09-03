@@ -100,7 +100,6 @@ def tiny_config(tmp_path, tiny_dataset_dir):
         },
         "k_fold": {"enabled": False},
         "checkpoint": {
-            "save_dir": str(tmp_path / "checkpoints"),
             "resume": False,
             "monitor_metric": "val_dice",
             "mode": "max",
@@ -108,11 +107,10 @@ def tiny_config(tmp_path, tiny_dataset_dir):
         "early_stopping": {"enabled": False},
         "stages": [],
         "logging": {
-            "log_dir": str(tmp_path / "logs"),
-            "tb_dir": str(tmp_path / "runs"),
             "experiment_name": "pytest_synth",
             "save_overlays": False,
         },
+        "output_dir": str(tmp_path / "outputs" / "experiments"),
     }
     return validate_config(raw)
 

@@ -21,7 +21,7 @@ import torch
 
 from orchestration.ledger import LedgerWriter
 from orchestration.manifest import build_manifest
-from orchestration.runid import config_hash, run_id
+from orchestration.runid import config_hash, experiment_paths, run_id
 from orchestration.runner import run_sweep
 from orchestration.schema import validate_config
 from train import run_training
@@ -162,19 +162,18 @@ def test_run_sweep_idempotent_skip(tmp_path, tiny_config):
         calls.append(run_id)
         return 0.42
 
-    artifacts_dir = str(tmp_path / "artifacts")
-    ledger_dir = str(tmp_path / "artifacts" / "ledger")
+    ledger_dir = str(tmp_path / "ledger")
 
     results_1 = run_sweep(
         tiny_config, seeds=[0, 1], folds=[None], train_fn=fake_train,
-        artifacts_dir=artifacts_dir, ledger_dir=ledger_dir,
+        ledger_dir=ledger_dir,
     )
     assert all(r["status"] == "done" for r in results_1)
     assert len(calls) == 2
 
     results_2 = run_sweep(
         tiny_config, seeds=[0, 1], folds=[None], train_fn=fake_train,
-        artifacts_dir=artifacts_dir, ledger_dir=ledger_dir,
+        ledger_dir=ledger_dir,
     )
     assert all(r["status"] == "skipped-done" for r in results_2)
     assert len(calls) == 2  # fake_train not called again
@@ -202,13 +201,16 @@ def test_determinism(tmp_path, tiny_config_factory):
     results = {}
     for run_name in ("a", "b"):
         cfg = tiny_config_factory()
-        cfg["checkpoint"]["save_dir"] = str(tmp_path / f"checkpoints_{run_name}")
+        cfg["output_dir"] = str(tmp_path / f"outputs_{run_name}")
         reset_recorded_nondeterminism()
 
         best_metric = run_training(cfg, fold=None)
 
         ckpt_path = os.path.join(
-            cfg["checkpoint"]["save_dir"], cfg["logging"]["experiment_name"], "last.pth"
+            experiment_paths(
+                cfg["output_dir"], cfg["logging"]["experiment_name"], cfg["training"]["seed"]
+            )["checkpoints"],
+            "last.pth",
         )
         ckpt = torch.load(ckpt_path, map_location="cpu")
         results[run_name] = {

@@ -52,9 +52,11 @@ _TABLE_FIELDS = {
 
 
 class LedgerWriter:
-    """One instance per ledger directory (typically ``artifacts/ledger/``)."""
+    """One instance per ledger directory (typically ``outputs/ledger/``) —
+    a global, cross-experiment index, deliberately flat and NOT nested
+    under any single experiment's directory."""
 
-    def __init__(self, ledger_dir: str = "artifacts/ledger"):
+    def __init__(self, ledger_dir: str = "outputs/ledger"):
         self.ledger_dir = Path(ledger_dir)
         self.ledger_dir.mkdir(parents=True, exist_ok=True)
 

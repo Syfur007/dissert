@@ -37,7 +37,12 @@ from training.callbacks import (
     TensorBoardCallback,
     TrainingCurvePlotCallback,
 )
-from orchestration.runid import config_hash, run_id as compute_run_id
+from orchestration.runid import (
+    check_and_record_run_meta,
+    config_hash,
+    experiment_paths,
+    run_id as compute_run_id,
+)
 from profiling.flops import FlopsAgreementError, check_flops_agreement
 from training.determinism import reset_recorded_nondeterminism, seed_everything
 from losses import get_loss
@@ -86,16 +91,25 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
         resolved_config_hash, seed=training_cfg["seed"], fold=fold
     )
 
-    # ── Logging ────────────────────────────────────────────────────────
-    base_exp        = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
-    fold_prefix     = f"_fold{fold}" if fold is not None else ""
-    experiment_name = f"{base_exp}{fold_prefix}"          # used for TB / checkpoints
+    # ── Output layout ──────────────────────────────────────────────────
+    # experiment_id = "{experiment_name}-s{seed}" — the one atomic,
+    # self-contained directory for this (experiment, seed), shared by every
+    # fold. See orchestration/runid.py:experiment_paths().
+    base_exp = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
+    paths = experiment_paths(
+        config.get("output_dir", "outputs/experiments"), base_exp, training_cfg["seed"], fold
+    )
 
-    # Log filename is e.g. "fold0", "fold1", or base name for non-CV runs.
-    # The directory is always logs/{base_exp}/ so all folds share one folder.
-    log_filename = f"fold{fold}" if fold is not None else base_exp
-    logger, exp_log_dir = setup_logger(log_cfg["log_dir"], base_exp, log_filename=log_filename)
+    # ── Logging ────────────────────────────────────────────────────────
+    # Log filename is "fold0"/"fold1" for a K-Fold run, "train" otherwise —
+    # the directory (paths["logs"]) already identifies the experiment, so
+    # the filename no longer needs to repeat the experiment name.
+    log_filename = f"fold{fold}" if fold is not None else "train"
+    logger, exp_log_dir = setup_logger(paths["logs"], log_filename)
     logger.info(f"Using device: {device}")
+    check_and_record_run_meta(
+        paths["run_meta"], base_exp, training_cfg["seed"], resolved_config_hash, logger=logger,
+    )
     logger.info(f"Experiment log dir: {exp_log_dir}")
 
     # ── Data ───────────────────────────────────────────────────────────
@@ -190,9 +204,7 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
         logger.info("Grad clip disabled.")
 
     # ── Checkpoint & Early Stopping ────────────────────────────────────
-    checkpoint_dir = os.path.join(
-        chk_cfg.get("save_dir", "checkpoints"), log_cfg["experiment_name"]
-    )
+    checkpoint_dir = paths["checkpoints"]
     chk_manager = CheckpointManager(
         save_dir        = checkpoint_dir,
         monitor_metric  = chk_cfg.get("monitor_metric", "val_dice"),
@@ -224,7 +236,7 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
         logger.info(f"EMA enabled | decay={ema.decay}")
 
     # ── TensorBoard tracker ────────────────────────────────────────────
-    tracker = TensorBoardTracker(log_cfg["tb_dir"], experiment_name)
+    tracker = TensorBoardTracker(paths["tensorboard"])
 
     # ── Callbacks ──────────────────────────────────────────────────────
     callbacks = [
@@ -246,7 +258,7 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     overlay_save_every = log_cfg.get("overlay_save_every", 10)
     overlay_n_samples  = log_cfg.get("overlay_n_samples", 4)
     if log_cfg.get("save_overlays", True) and overlay_save_every > 0:
-        overlay_dir = os.path.join(exp_log_dir, "overlays")
+        overlay_dir = os.path.join(paths["plots"], "overlays")
         callbacks.append(
             PredictionOverlayCallback(
                 val_loader  = val_loader,
@@ -266,17 +278,16 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     callbacks.append(
         TrainingCurvePlotCallback(
             tb_log_dir = tracker.log_dir,   # the TensorBoard event directory
-            out_dir    = exp_log_dir,
+            out_dir    = paths["plots"],
         )
     )
 
     # ── Resume ─────────────────────────────────────────────────────────
     start_epoch   = 1
-    fold_suffix   = f"_fold{fold}" if fold is not None else ""
 
     if chk_cfg.get("resume", False):
         chk_path = chk_cfg.get("checkpoint_path") or os.path.join(
-            checkpoint_dir, f"last{fold_suffix}.pth"
+            checkpoint_dir, "last.pth"
         )
         if os.path.exists(chk_path):
             start_epoch, loaded_metric, _ = chk_manager.load(
@@ -286,13 +297,13 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
             if loaded_metric is not None:
                 chk_manager.best_metric = loaded_metric
 
-            # The historical best score lives in best{fold_suffix}.pth, not
-            # necessarily in whatever checkpoint we just resumed from (that's
-            # usually last.pth, whose metric_val is only the last completed
-            # epoch's score). Re-seed best_metric from the actual best
-            # checkpoint so a resumed run can't mistake a mediocre epoch for
-            # an improvement and overwrite a genuinely better checkpoint.
-            best_path = os.path.join(checkpoint_dir, f"best{fold_suffix}.pth")
+            # The historical best score lives in best.pth, not necessarily
+            # in whatever checkpoint we just resumed from (that's usually
+            # last.pth, whose metric_val is only the last completed epoch's
+            # score). Re-seed best_metric from the actual best checkpoint so
+            # a resumed run can't mistake a mediocre epoch for an
+            # improvement and overwrite a genuinely better checkpoint.
+            best_path = os.path.join(checkpoint_dir, "best.pth")
             if os.path.exists(best_path):
                 best_ckpt = torch.load(best_path, map_location="cpu")
                 if best_ckpt.get("metric_val") is not None:

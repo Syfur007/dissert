@@ -5,7 +5,7 @@ EvaluationReporter._write_json output — the "S6 Main comparison" and
 "S16 Profiling" artefacts, already-computed, never re-touched here),
 assemble them into the results/profiling row-shapes
 reporting.tables.render_main_comparison_table/render_efficiency_table
-expect, and write reports/tables/*.{csv,tex}.
+expect, and write outputs/reports/*.{csv,tex}.
 
 Only reads JSON (spec §16: "The reporting layer cannot read checkpoints
 or recompute metrics") — every number in the emitted tables is copied
@@ -68,8 +68,8 @@ def _to_profiling_rows(reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render manuscript tables from eval.py JSON reports")
     parser.add_argument("--reports-glob", type=str, required=True, help="Glob for eval.py *_report.json files")
-    parser.add_argument("--ledger-dir", type=str, default="artifacts/ledger")
-    parser.add_argument("--out-dir", type=str, default="reports/tables")
+    parser.add_argument("--ledger-dir", type=str, default="outputs/ledger")
+    parser.add_argument("--out-dir", type=str, default="outputs/reports")
     parser.add_argument("--snapshot-id", type=str, required=True)
     args = parser.parse_args()
 

@@ -206,7 +206,7 @@ def test_rolling_tracks_canonical_at_epoch_end(tiny_config_factory):
         cfg["training"], optimizer, steps_per_epoch=len(train_loader)
     )
     chk_manager = CheckpointManager(
-        save_dir=cfg["checkpoint"]["save_dir"], monitor_metric="val_dice", mode="max"
+        save_dir=cfg["output_dir"], monitor_metric="val_dice", mode="max"
     )
 
     trainer = Trainer(

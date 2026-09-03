@@ -286,7 +286,6 @@ class KFoldConfig(_Strict):
 
 
 class CheckpointConfig(_Strict):
-    save_dir: str = "checkpoints"
     resume: bool = True
     checkpoint_path: str = ""
     monitor_metric: str = "val_dice"
@@ -307,8 +306,6 @@ class StageConfig(_Strict):
 
 
 class LoggingConfig(_Strict):
-    log_dir: str = "logs"
-    tb_dir: str = "runs"
     experiment_name: str
     log_interval: int = 10
     save_overlays: bool = True
@@ -330,6 +327,7 @@ class Config(_Strict):
     stages: List[StageConfig] = Field(default_factory=list)
     logging: LoggingConfig
     stats: Optional[StatsConfig] = None
+    output_dir: str = "outputs/experiments"
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +338,7 @@ class SearchMetaConfig(_Strict):
     method: Literal["grid", "random"] = "grid"
     num_trials: int = 5
     seed: int = 42
-    output_dir: str = "search_results"
+    output_dir: str = "outputs/searches/search"
     # Phase 14 (orchestration/sweep.py): spec §15's "sweep.py takes a
     # search space and a trial budget" — required by sweep.py's CLI
     # (num_trials alone is search.py's older, superseded stopping rule).

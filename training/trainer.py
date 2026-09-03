@@ -153,15 +153,12 @@ class Trainer:
         monitor_raw = self._chkcfg.get("monitor_metric", "val_dice")
         self._monitor_key = monitor_raw.replace("val_", "")
 
-        # Fold suffix used in checkpoint filenames
-        self._fold_suffix = f"_fold{fold}" if fold is not None else ""
-
-        # Checkpoint directory (for in-loop extra-state persistence)
-        log_cfg = config.get("logging", {})
-        self._chk_dir = os.path.join(
-            self._chkcfg.get("save_dir", "checkpoints"),
-            log_cfg.get("experiment_name", "experiment"),
-        )
+        # Checkpoint directory (for in-loop extra-state persistence) — read
+        # off the CheckpointManager we were already given, rather than
+        # re-deriving it from config (that duplicate derivation used to
+        # drift from train.py's own, since fold-scoping lived only in the
+        # filename suffix, not in this independently-rebuilt path).
+        self._chk_dir = self.chk_manager.save_dir
 
     # ------------------------------------------------------------------
     # Public API
@@ -598,9 +595,9 @@ class Trainer:
         if self.ema is not None:
             extra_common["ema_state"] = self.ema.state_dict()
 
-        targets = [os.path.join(self._chk_dir, f"last{self._fold_suffix}.pth")]
+        targets = [os.path.join(self._chk_dir, "last.pth")]
         if is_best:
-            targets.append(os.path.join(self._chk_dir, f"best{self._fold_suffix}.pth"))
+            targets.append(os.path.join(self._chk_dir, "best.pth"))
 
         for path in targets:
             if not os.path.exists(path):

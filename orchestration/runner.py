@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .ledger import LedgerWriter
 from .manifest import build_manifest
 from .runid import config_hash as compute_config_hash
+from .runid import experiment_paths
 from .runid import run_id as compute_run_id
 from training.determinism import (
     get_recorded_manifest_extras,
@@ -34,8 +35,11 @@ from training.determinism import (
 TrainFn = Callable[..., float]
 
 
-def _manifest_path(artifacts_dir: str, rid: str) -> str:
-    return os.path.join(artifacts_dir, "runs", rid, "manifest.json")
+def _manifest_path(output_dir: str, experiment_name: str, seed: int, fold: Optional[int]) -> str:
+    # Co-located with that fold's checkpoints — the same directory
+    # train.py's CheckpointManager writes best.pth/last.pth into.
+    checkpoints_dir = experiment_paths(output_dir, experiment_name, seed, fold)["checkpoints"]
+    return os.path.join(checkpoints_dir, "manifest.json")
 
 
 def _existing_status(path: str) -> Optional[str]:
@@ -61,8 +65,7 @@ def run_sweep(
     seeds: Sequence[int],
     folds: Sequence[Optional[int]] = (None,),
     train_fn: Optional[TrainFn] = None,
-    artifacts_dir: str = "artifacts",
-    ledger_dir: str = "artifacts/ledger",
+    ledger_dir: str = "outputs/ledger",
     force: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run *train_fn* (defaults to ``train.run_training``) once per
@@ -91,10 +94,13 @@ def run_sweep(
     ledger = LedgerWriter(ledger_dir)
     results: List[Dict[str, Any]] = []
 
+    output_dir = resolved_config.get("output_dir", "outputs/experiments")
+    experiment_name = resolved_config.get("logging", {}).get("experiment_name", "experiment")
+
     for seed in seeds:
         for fold in folds:
             rid = compute_run_id(h, seed=seed, fold=fold)
-            mpath = _manifest_path(artifacts_dir, rid)
+            mpath = _manifest_path(output_dir, experiment_name, seed, fold)
 
             if not force and _existing_status(mpath) == "done":
                 results.append(

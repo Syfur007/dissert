@@ -1,7 +1,10 @@
 """
 Run manifest: the single artifact that explains how a run's checkpoints/logs
 came to exist — resolved config, config hash, code version, environment,
-hardware, timing — written to artifacts/runs/<run_id>/manifest.json.
+hardware, timing — written to
+outputs/experiments/<experiment_name>-s<seed>/checkpoints/fold<N>/manifest.json
+(orchestration.runner.run_sweep's per-(seed, fold) provenance file,
+co-located with that fold's checkpoints).
 
 Every field-gathering helper here is best-effort: a manifest with a missing
 optional field (no nvidia-smi on a CPU box, no psutil installed) is far more
@@ -111,7 +114,7 @@ class RunManifest:
             manifest.finish(status="done")
         except Exception as exc:
             manifest.finish(status="failed", error=str(exc))
-        manifest.save(f"artifacts/runs/{run_id}/manifest.json")
+        manifest.save(manifest_path)  # see orchestration.runner._manifest_path
     """
 
     def __init__(

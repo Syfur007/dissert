@@ -200,9 +200,9 @@ def test_external_flows_through_standard_split_datamodule(tmp_path, tiny_dataset
         },
         "training": {"epochs": 1, "lr": 0.01, "loss_type": "dice", "device": "cpu", "seed": 42},
         "k_fold": {"enabled": False},
-        "checkpoint": {"save_dir": str(tmp_path / "ckpt"), "resume": False},
-        "logging": {"log_dir": str(tmp_path / "logs"), "tb_dir": str(tmp_path / "runs"),
-                    "experiment_name": "ext"},
+        "checkpoint": {"resume": False},
+        "logging": {"experiment_name": "ext"},
+        "output_dir": str(tmp_path / "outputs"),
     }
     cfg = validate_config(raw)
     dm = StandardSplitDataModule(cfg)
@@ -219,7 +219,7 @@ def test_test_loader_guard(tiny_config):
     from orchestration.ledger import LedgerWriter
 
     dm = StandardSplitDataModule(tiny_config)
-    ledger_dir = tiny_config["checkpoint"]["save_dir"] + "_ledger"
+    ledger_dir = tiny_config["output_dir"] + "_ledger"
 
     # No token / empty token -> refused.
     with pytest.raises(TestLoaderGuardError):

@@ -94,8 +94,8 @@ class PeriodicCheckpointCallback(Callback):
     Args:
         save_every: Checkpoint interval in epochs.  0 or negative → disabled.
         save_dir:   Directory where snapshots are written (same as CheckpointManager
-                    save_dir by default; overridable for isolation).
-        fold:       Optional fold index, appended as ``_fold{fold}`` in the filename.
+                    save_dir by default — already fold-scoped by the caller).
+        fold:       Optional fold index, recorded into the snapshot's state dict.
     """
 
     def __init__(self, save_every: int, save_dir: str, fold: Optional[int] = None):
@@ -113,8 +113,7 @@ class PeriodicCheckpointCallback(Callback):
         if self.save_every <= 0 or epoch % self.save_every != 0:
             return
 
-        fold_suffix = f"_fold{self.fold}" if self.fold is not None else ""
-        path = os.path.join(self.save_dir, f"epoch_{epoch:04d}{fold_suffix}.pth")
+        path = os.path.join(self.save_dir, f"epoch_{epoch:04d}.pth")
 
         state: Dict[str, Any] = {
             "epoch":              epoch,
@@ -367,10 +366,10 @@ class TrainingCurvePlotCallback(Callback):
     writing throughout training and saves one PNG per scalar tag to ``out_dir``.
 
     Args:
-        tb_log_dir: TensorBoard run directory (the ``log_dir`` of the tracker,
-                    i.e. ``{tb_dir}/{experiment_name}``).
-        out_dir:    Directory where PNGs are written (typically the experiment
-                    log subfolder, e.g. ``logs/{experiment_name}``).
+        tb_log_dir: TensorBoard run directory (the fold-scoped ``tensorboard``
+                    dir from ``experiment_paths()``).
+        out_dir:    The fold-scoped ``plots`` dir from ``experiment_paths()``
+                    — PNGs land in its ``curves/`` subfolder.
     """
 
     def __init__(self, tb_log_dir: str, out_dir: str):
@@ -386,7 +385,7 @@ class TrainingCurvePlotCallback(Callback):
             )
             return
 
-        plots_dir = os.path.join(self.out_dir, "plots")
+        plots_dir = os.path.join(self.out_dir, "curves")
         try:
             saved = plot_training_curves(
                 tb_log_dir=self.tb_log_dir,

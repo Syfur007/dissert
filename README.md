@@ -33,6 +33,8 @@ CUDA build and the Mamba fused-kernel dependency notes live in `requirements.txt
 | Analysis | `stats/` `profiling/` `attribution/` `uncertainty/` `robustness/` `analysis/` | Significance testing, efficiency, explainability, robustness |
 | Reporting | `reporting/` | Manuscript tables/figures, blocking rules |
 
+Every run's output — checkpoints, logs, tensorboard, plots, eval report — lands under `outputs/experiments/<experiment_name>-s<seed>/`; see [`OUTPUT_LAYOUT.md`](OUTPUT_LAYOUT.md) for the full tree.
+
 ## 3 · MODELS
 
 | Registry name | Kind |

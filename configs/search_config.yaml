@@ -4,7 +4,7 @@ search:
   method: "grid"           # "grid" (exhaustive Cartesian) or "random" (sampled subset)
   num_trials: 5            # Max trials to run when method is "random"
   seed: 42                 # RNG seed for reproducible random sampling
-  output_dir: "search_results"
+  output_dir: "outputs/searches/search"
 
 # Param grid: list of values to search over for each hyperparameter.
 # Nested keys mirror the structure of the base config YAML.

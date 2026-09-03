@@ -31,6 +31,7 @@ from models.build import build_width_matched
 from models.decoder import MambaDecoder
 from models.fusion import build_fusion
 from models.registry import ModelBudgetExceededError, get_model
+from orchestration.runid import experiment_paths
 from orchestration.schema import validate_config
 from training.determinism import (
     get_recorded_manifest_extras,
@@ -297,15 +298,15 @@ def _tiny_mamba_config(tmp_path, tiny_dataset_dir, seed: int, name_suffix: str) 
         },
         "k_fold": {"enabled": False},
         "checkpoint": {
-            "save_dir": str(tmp_path / f"ckpt_{name_suffix}"), "resume": False,
+            "resume": False,
             "monitor_metric": "val_dice", "mode": "max",
         },
         "early_stopping": {"enabled": False},
         "stages": [],
         "logging": {
-            "log_dir": str(tmp_path / "logs"), "tb_dir": str(tmp_path / "runs"),
             "experiment_name": "mamba_determinism_test", "save_overlays": False,
         },
+        "output_dir": str(tmp_path / f"outputs_{name_suffix}"),
     }
     return validate_config(raw)
 
@@ -328,7 +329,10 @@ def test_mamba_determinism(tmp_path, tiny_dataset_dir):
         best_metric = run_training(cfg, fold=None)
 
         ckpt_path = os.path.join(
-            cfg["checkpoint"]["save_dir"], cfg["logging"]["experiment_name"], "last.pth"
+            experiment_paths(
+                cfg["output_dir"], cfg["logging"]["experiment_name"], cfg["training"]["seed"]
+            )["checkpoints"],
+            "last.pth",
         )
         ckpt = torch.load(ckpt_path, map_location="cpu")
         results[tag] = {
