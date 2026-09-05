@@ -35,10 +35,12 @@ from training.determinism import (
 TrainFn = Callable[..., float]
 
 
-def _manifest_path(output_dir: str, experiment_name: str, seed: int, fold: Optional[int]) -> str:
+def _manifest_path(
+    output_dir: str, experiment_name: str, config_hash_: str, seed: int, fold: Optional[int]
+) -> str:
     # Co-located with that fold's checkpoints — the same directory
     # train.py's CheckpointManager writes best.pth/last.pth into.
-    checkpoints_dir = experiment_paths(output_dir, experiment_name, seed, fold)["checkpoints"]
+    checkpoints_dir = experiment_paths(output_dir, experiment_name, config_hash_, seed, fold)["checkpoints"]
     return os.path.join(checkpoints_dir, "manifest.json")
 
 
@@ -100,7 +102,7 @@ def run_sweep(
     for seed in seeds:
         for fold in folds:
             rid = compute_run_id(h, seed=seed, fold=fold)
-            mpath = _manifest_path(output_dir, experiment_name, seed, fold)
+            mpath = _manifest_path(output_dir, experiment_name, h, seed, fold)
 
             if not force and _existing_status(mpath) == "done":
                 results.append(

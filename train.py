@@ -92,12 +92,13 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     )
 
     # ── Output layout ──────────────────────────────────────────────────
-    # experiment_id = "{experiment_name}-s{seed}" — the one atomic,
-    # self-contained directory for this (experiment, seed), shared by every
-    # fold. See orchestration/runid.py:experiment_paths().
+    # {output_dir}/{experiment_name}/{hash7}-s{seed}/ — the one atomic,
+    # self-contained directory for this (config_hash, seed), shared by
+    # every fold. See orchestration/runid.py:experiment_paths().
     base_exp = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
     paths = experiment_paths(
-        config.get("output_dir", "outputs/experiments"), base_exp, training_cfg["seed"], fold
+        config.get("output_dir", "outputs/experiments"), base_exp,
+        resolved_config_hash, training_cfg["seed"], fold,
     )
 
     # ── Logging ────────────────────────────────────────────────────────
@@ -372,11 +373,23 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
 # CLI
 # ---------------------------------------------------------------------------
 
+# Default multi-seed sweep — a bare `python train.py --config X` trains and
+# evaluates every experiment on all 3 by default (see SESSION_GROUPING_PLAN.md).
+DEFAULT_SEEDS = [7, 42, 1337]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train PyTorch Segmentation Pipeline")
     parser.add_argument("--config",          type=str,   default="configs/experiment/mkunet/mkunet_t_clinicdb.yaml")
     parser.add_argument("--fold",            type=int,   default=None,
                         help="Specific K-Fold index to train (0-indexed)")
+    seed_group = parser.add_mutually_exclusive_group()
+    seed_group.add_argument("--seed",  type=int, default=None,
+                        help="Run exactly this one seed, bypassing the default 3-seed sweep.")
+    seed_group.add_argument("--seeds", type=int, nargs="+", default=None,
+                        help=f"Run exactly these seeds via run_sweep (default: {DEFAULT_SEEDS}).")
+    parser.add_argument("--force",           action="store_true",
+                        help="Re-run seeds whose manifest already reports status=done.")
     parser.add_argument("--resume",          action="store_true")
     parser.add_argument("--lr",              type=float, default=None)
     parser.add_argument("--batch-size",      type=int,   default=None)
@@ -422,42 +435,73 @@ def main():
 
     kfold_cfg = config.get("k_fold", {})
 
-    if kfold_cfg.get("enabled", False) and args.fold is None:
-        n_splits   = kfold_cfg.get("n_splits", 5)
-        run_folds  = kfold_cfg.get("run_folds") or list(range(n_splits))
+    if args.seed is not None:
+        # Single explicit seed — bypasses the default multi-seed sweep
+        # entirely; exact pre-existing single-run behavior otherwise.
+        config["training"]["seed"] = args.seed
 
-        print(f"K-Fold Cross Validation ({n_splits} splits) over folds: {run_folds}")
-        fold_results = []
-        for f in run_folds:
-            print(f"\n{'='*20} TRAINING FOLD {f} {'='*20}")
-            try:
-                fold_results.append((f, run_training(config, fold=f), None))
-            except Exception as e:
-                # Don't let one bad fold (e.g. a CUDA OOM) take down the
-                # whole multi-hour sweep and lose every already-completed
-                # fold's results — log it and move on, same as search.py
-                # already does per-trial.
-                print(f"Fold {f} failed with error: {e}")
-                fold_results.append((f, None, str(e)))
+        if kfold_cfg.get("enabled", False) and args.fold is None:
+            n_splits   = kfold_cfg.get("n_splits", 5)
+            run_folds  = kfold_cfg.get("run_folds") or list(range(n_splits))
 
-        print(f"\n{'='*20} K-FOLD SUMMARY {'='*20}")
-        print(f"Metric ({config['checkpoint']['monitor_metric']}) per fold:")
-        successful_scores = []
-        for f, score, error in fold_results:
-            if error is None:
-                print(f"  Fold {f}: {score:.4f}")
-                successful_scores.append(score)
+            print(f"K-Fold Cross Validation ({n_splits} splits) over folds: {run_folds}")
+            fold_results = []
+            for f in run_folds:
+                print(f"\n{'='*20} TRAINING FOLD {f} {'='*20}")
+                try:
+                    fold_results.append((f, run_training(config, fold=f), None))
+                except Exception as e:
+                    # Don't let one bad fold (e.g. a CUDA OOM) take down the
+                    # whole multi-hour sweep and lose every already-completed
+                    # fold's results — log it and move on, same as search.py
+                    # already does per-trial.
+                    print(f"Fold {f} failed with error: {e}")
+                    fold_results.append((f, None, str(e)))
+
+            print(f"\n{'='*20} K-FOLD SUMMARY {'='*20}")
+            print(f"Metric ({config['checkpoint']['monitor_metric']}) per fold:")
+            successful_scores = []
+            for f, score, error in fold_results:
+                if error is None:
+                    print(f"  Fold {f}: {score:.4f}")
+                    successful_scores.append(score)
+                else:
+                    print(f"  Fold {f}: FAILED — {error}")
+            if successful_scores:
+                print(
+                    f"Mean: {np.mean(successful_scores):.4f} ± {np.std(successful_scores):.4f} "
+                    f"(over {len(successful_scores)}/{len(run_folds)} successful folds)"
+                )
             else:
-                print(f"  Fold {f}: FAILED — {error}")
-        if successful_scores:
-            print(
-                f"Mean: {np.mean(successful_scores):.4f} ± {np.std(successful_scores):.4f} "
-                f"(over {len(successful_scores)}/{len(run_folds)} successful folds)"
-            )
+                print("No folds completed successfully.")
         else:
-            print("No folds completed successfully.")
+            run_training(config, fold=args.fold)
+        return
+
+    # Default: sweep DEFAULT_SEEDS (or --seeds) via orchestration.runner.
+    # run_sweep — one call covering every seed x fold combination, reusing
+    # the same manifest/ledger/idempotent-skip machinery scripts/reproduce.sh
+    # and search.py already drive it through.
+    from orchestration.runner import run_sweep
+
+    seeds = args.seeds or DEFAULT_SEEDS
+    if args.fold is not None:
+        folds = (args.fold,)
+    elif kfold_cfg.get("enabled", False):
+        n_splits = kfold_cfg.get("n_splits", 5)
+        folds = kfold_cfg.get("run_folds") or list(range(n_splits))
     else:
-        run_training(config, fold=args.fold)
+        folds = (None,)
+
+    print(f"Training {len(seeds)} seed(s) {seeds} x {len(folds)} fold(s) {list(folds)}...")
+    results = run_sweep(config, seeds=seeds, folds=folds, force=args.force)
+    for r in results:
+        print(f"run_id={r['run_id']} status={r['status']} "
+              f"best_metric={r['best_metric']} error={r['error']}")
+
+    failed = [r for r in results if r["status"] not in ("done", "skipped-done")]
+    if failed:
+        raise SystemExit(f"{len(failed)}/{len(results)} runs failed — see logs above.")
 
 
 if __name__ == "__main__":

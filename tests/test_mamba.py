@@ -31,7 +31,7 @@ from models.build import build_width_matched
 from models.decoder import MambaDecoder
 from models.fusion import build_fusion
 from models.registry import ModelBudgetExceededError, get_model
-from orchestration.runid import experiment_paths
+from orchestration.runid import config_hash, experiment_paths
 from orchestration.schema import validate_config
 from training.determinism import (
     get_recorded_manifest_extras,
@@ -330,7 +330,8 @@ def test_mamba_determinism(tmp_path, tiny_dataset_dir):
 
         ckpt_path = os.path.join(
             experiment_paths(
-                cfg["output_dir"], cfg["logging"]["experiment_name"], cfg["training"]["seed"]
+                cfg["output_dir"], cfg["logging"]["experiment_name"],
+                config_hash(cfg), cfg["training"]["seed"],
             )["checkpoints"],
             "last.pth",
         )

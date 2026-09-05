@@ -11,7 +11,7 @@ def setup_logger(log_dir: str, log_filename: str):
     function does no further path construction beyond the filename itself.
     All folds and eval runs share one *log_dir* with distinct filenames:
 
-        outputs/experiments/my_experiment-s42/logs/
+        outputs/experiments/my_experiment/a1b2c3d-s42/logs/
             fold0.log
             fold1.log
             eval.log

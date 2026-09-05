@@ -33,7 +33,7 @@ CUDA build and the Mamba fused-kernel dependency notes live in `requirements.txt
 | Analysis | `stats/` `profiling/` `attribution/` `uncertainty/` `robustness/` `analysis/` | Significance testing, efficiency, explainability, robustness |
 | Reporting | `reporting/` | Manuscript tables/figures, blocking rules |
 
-Every run's output — checkpoints, logs, tensorboard, plots, eval report — lands under `outputs/experiments/<experiment_name>-s<seed>/`; see [`OUTPUT_LAYOUT.md`](OUTPUT_LAYOUT.md) for the full tree.
+Every run's output — checkpoints, logs, tensorboard, plots, eval report — lands under `outputs/experiments/<experiment_name>/<config_hash7>-s<seed>/`, with a seed-averaged combined report at `outputs/experiments/<experiment_name>/<experiment_name>.json`; see [`OUTPUT_LAYOUT.md`](OUTPUT_LAYOUT.md) for the full tree. By default `train.py`/`eval.py` each sweep 3 seeds (`[7, 42, 1337]`) automatically — pass `--seed N` for a single explicit seed instead.
 
 ## 3 · MODELS
 

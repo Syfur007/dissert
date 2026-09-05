@@ -99,6 +99,46 @@ def test_config_hash_changes_with_real_change(tiny_config):
     assert config_hash(a) != config_hash(b)
 
 
+def test_config_hash_stable_across_experiment_name(tiny_config):
+    a = copy.deepcopy(tiny_config)
+    b = copy.deepcopy(tiny_config)
+    b["logging"]["experiment_name"] = "totally_different_name"
+    assert config_hash(a) == config_hash(b)
+
+
+def test_config_hash_stable_across_output_dir(tiny_config):
+    a = copy.deepcopy(tiny_config)
+    b = copy.deepcopy(tiny_config)
+    b["output_dir"] = "some/other/output/dir"
+    assert config_hash(a) == config_hash(b)
+
+
+def test_config_hash_stable_across_checkpoint_bookkeeping(tiny_config):
+    a = copy.deepcopy(tiny_config)
+    b = copy.deepcopy(tiny_config)
+    b["checkpoint"]["checkpoint_path"] = "/some/other/checkpoint.pth"
+    b["checkpoint"]["resume"] = not b["checkpoint"].get("resume", True)
+    b["checkpoint"]["periodic_save_every"] = 999
+    assert config_hash(a) == config_hash(b)
+
+
+def test_config_hash_stable_across_stats_section(tiny_config):
+    a = copy.deepcopy(tiny_config)
+    b = copy.deepcopy(tiny_config)
+    a["stats"] = {"family": "fam_a", "comparators": [], "min_meaningful_diff": 0.01, "alpha": 0.05}
+    b["stats"] = {"family": "fam_b", "comparators": ["x"], "min_meaningful_diff": 0.02, "alpha": 0.1}
+    assert config_hash(a) == config_hash(b)
+
+
+def test_config_hash_changes_with_checkpoint_monitor_metric(tiny_config):
+    # monitor_metric/mode are deliberately NOT stripped — they change which
+    # checkpoint gets selected as "best", i.e. the actual result.
+    a = copy.deepcopy(tiny_config)
+    b = copy.deepcopy(tiny_config)
+    b["checkpoint"]["monitor_metric"] = "val_loss"
+    assert config_hash(a) != config_hash(b)
+
+
 def test_run_id_format(tiny_config):
     h = config_hash(tiny_config)
     assert run_id(h, seed=7, fold=2) == f"R-{h[:7]}-s7-f2"
@@ -208,7 +248,8 @@ def test_determinism(tmp_path, tiny_config_factory):
 
         ckpt_path = os.path.join(
             experiment_paths(
-                cfg["output_dir"], cfg["logging"]["experiment_name"], cfg["training"]["seed"]
+                cfg["output_dir"], cfg["logging"]["experiment_name"],
+                config_hash(cfg), cfg["training"]["seed"],
             )["checkpoints"],
             "last.pth",
         )

@@ -44,7 +44,7 @@ from .polyp.clinicdb import ClinicDB
 from .polyp.colondb import ColonDB
 from .busi import BUSI
 from .isic18 import ISIC18
-from orchestration.runid import experiment_paths
+from orchestration.runid import config_hash, experiment_paths
 
 _MODEL_STRIDE = 32
 
@@ -296,9 +296,15 @@ class KFoldDataModule(BaseDataModule):
     Data module for k-fold cross-validation.
 
     Fold assignments are serialised to
-    ``outputs/experiments/<experiment_name>-s<seed>/fold_splits.json`` on the
-    first call to ``get_fold_loaders`` and reloaded on subsequent calls, so
-    resumed runs always use the same split.
+    ``outputs/experiments/<experiment_name>/<hash7>-fold_splits.json`` on
+    the first call to ``get_fold_loaders`` and reloaded on subsequent
+    calls. This is keyed by config hash, not by seed — every seed of a
+    3-seed sweep (see SESSION_GROUPING_PLAN.md) must train/validate on the
+    *same* fold partition, so only model-init/training randomness varies
+    across seeds, not the data split itself. The ``KFold`` partition's own
+    ``random_state`` is likewise derived from the config hash rather than
+    ``training.seed``, so all seeds deterministically compute (or find
+    already cached) the identical partition regardless of run order.
 
     CAUTION — frame-level splitting, no video/sequence grouping:
     Folds are drawn from ``sklearn.model_selection.KFold`` over individual
@@ -331,9 +337,12 @@ class KFoldDataModule(BaseDataModule):
         self.handler = DATASETS[name](ds_cfg, self._seed)
         self.kf_cfg  = config.get("k_fold", {})
 
+        self._config_hash = config_hash(config)
         exp_name        = config.get("logging", {}).get("experiment_name", "experiment")
         output_dir      = config.get("output_dir", "outputs/experiments")
-        self._fold_file = experiment_paths(output_dir, exp_name, self._seed)["fold_splits"]
+        self._fold_file = experiment_paths(
+            output_dir, exp_name, self._config_hash, self._seed
+        )["fold_splits"]
 
     def _load_or_create_fold_splits(self) -> list:
         """
@@ -345,15 +354,17 @@ class KFoldDataModule(BaseDataModule):
         if os.path.exists(self._fold_file):
             with open(self._fold_file) as f:
                 cached = json.load(f)
-            if cached.get("n_splits") == n_splits and cached.get("seed") == self._seed:
+            # Keyed by config_hash, not seed — every seed of this config
+            # must hit this branch and reuse the same partition.
+            if cached.get("n_splits") == n_splits and cached.get("config_hash") == self._config_hash:
                 return cached["folds"]
             logger.warning(
                 f"Cached fold splits at {self._fold_file} were built with "
-                f"n_splits={cached.get('n_splits')}, seed={cached.get('seed')}, but "
-                f"the current config requests n_splits={n_splits}, seed={self._seed}. "
-                "Regenerating fold splits — the old file will be overwritten. "
-                "Any checkpoint resumed against a specific fold index may no "
-                "longer correspond to the same data as before."
+                f"n_splits={cached.get('n_splits')}, config_hash={cached.get('config_hash')}, "
+                f"but the current config requests n_splits={n_splits}, "
+                f"config_hash={self._config_hash}. Regenerating fold splits — the old "
+                "file will be overwritten. Any checkpoint resumed against a specific "
+                "fold index may no longer correspond to the same data as before."
             )
 
         all_pairs = np.array(self.handler.get_kfold_pairs())
@@ -364,7 +375,12 @@ class KFoldDataModule(BaseDataModule):
         # docstring above: near-duplicate frames from the same source video
         # can land in both sides of a fold. Swap for GroupKFold if you have
         # a frame → video mapping for your data.
-        kf    = KFold(n_splits=n_splits, shuffle=True, random_state=self._seed)
+        #
+        # random_state is derived from config_hash (not training.seed) so
+        # every seed of a multi-seed sweep computes the identical partition
+        # — see the class docstring.
+        fold_seed = int(self._config_hash[:8], 16) % (2**31 - 1)
+        kf    = KFold(n_splits=n_splits, shuffle=True, random_state=fold_seed)
         folds = [
             {"train": all_pairs[ti].tolist(), "val": all_pairs[vi].tolist()}
             for ti, vi in kf.split(all_pairs)
@@ -372,7 +388,7 @@ class KFoldDataModule(BaseDataModule):
 
         os.makedirs(os.path.dirname(self._fold_file), exist_ok=True)
         with open(self._fold_file, "w") as f:
-            json.dump({"n_splits": n_splits, "seed": self._seed, "folds": folds}, f)
+            json.dump({"n_splits": n_splits, "config_hash": self._config_hash, "folds": folds}, f)
 
         return folds
 

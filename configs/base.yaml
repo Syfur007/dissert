@@ -125,7 +125,7 @@ training:
 output_dir: "outputs/experiments"
 
 k_fold:
-  enabled: true           # Set to true to run K-Fold cross validation
+  enabled: false          # Set to true to run K-Fold cross validation
   n_splits: 5              # Number of folds
   run_folds: null          # List of folds to run (e.g. [0, 1, 2]), null means run all
 

@@ -169,9 +169,9 @@ def main():
         
         # Each trial is a first-class experiment: trial_name becomes its
         # experiment_name, so it lands at its own
-        # outputs/experiments/{trial_name}-s{seed}/ (via the inherited
-        # top-level output_dir default) — no separate log/checkpoint tree
-        # for search.py to maintain.
+        # outputs/experiments/{trial_name}/{hash7}-s{seed}/ (via the
+        # inherited top-level output_dir default) — no separate
+        # log/checkpoint tree for search.py to maintain.
         trial_config['logging']['experiment_name'] = trial_name
 
         # Disable K-Fold during search to keep individual trial times short

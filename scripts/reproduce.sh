@@ -62,11 +62,11 @@ pytest tests/test_channels.py -q
 # (<original>_reproduce_<snapshot>), never the config's own bare
 # experiment_name — confirmed the hard way while building this script:
 # reusing the bare name overwrote an existing real run's
-# outputs/experiments/<name>-s<seed>/eval/report.json with the smoke
-# run's own. Seed no longer needs manually folding into the name — it's
-# already part of the on-disk experiment_id ("{experiment_name}-s{seed}",
-# see orchestration/runid.py), so each seed below lands in its own
-# directory automatically.
+# outputs/experiments/<name>/<hash7>-s<seed>/eval/report.json with the
+# smoke run's own. Seed no longer needs manually folding into the name —
+# it's already part of the on-disk experiment_id ("{config_hash[:7]}-s
+# {seed}", nested under experiment_name — see orchestration/runid.py), so
+# each seed below lands in its own directory automatically.
 BASE_EXP_NAME="$(python3 -c "from utils.config import load_config; print(load_config('$MODEL_CONFIG')['logging']['experiment_name'])")"
 REPRODUCE_TAG="${BASE_EXP_NAME}_reproduce_${SNAPSHOT_ID}"
 
@@ -75,7 +75,7 @@ echo "=============================================================="
 echo "S3/S4/S6 Sanity training / baseline repro / main comparison"
 echo "   — reduced to ${EPOCHS} epoch(s), seed(s): ${SEEDS}, on"
 echo "   ${MODEL_CONFIG}, via orchestration.runner.run_sweep"
-echo "   scoped experiment name: ${REPRODUCE_TAG} (outputs/experiments/${REPRODUCE_TAG}-s<seed>/)"
+echo "   scoped experiment name: ${REPRODUCE_TAG} (outputs/experiments/${REPRODUCE_TAG}/<hash7>-s<seed>/)"
 echo "=============================================================="
 python3 - "$MODEL_CONFIG" "$EPOCHS" "$LEDGER_DIR" "$SEEDS" "$REPRODUCE_TAG" <<'PYEOF'
 import sys
@@ -147,7 +147,7 @@ echo "=============================================================="
 echo "S15 External — guarded one-time test evaluation via eval.py,"
 echo "   once per seed's checkpoint (no --fold: S6 above ran with"
 echo "   k_fold disabled, so each seed's checkpoint is"
-echo "   outputs/experiments/${REPRODUCE_TAG}-s<seed>/checkpoints/best.pth)"
+echo "   outputs/experiments/${REPRODUCE_TAG}/<hash7>-s<seed>/checkpoints/best.pth)"
 echo "=============================================================="
 for seed in $SEEDS; do
     python3 eval.py --config "$MODEL_CONFIG" --experiment-name "$REPRODUCE_TAG" --seed "$seed" --allow-test-eval
@@ -166,7 +166,7 @@ echo "=============================================================="
 echo "S17 Reporting — render manuscript tables from eval.py's JSON dumps"
 echo "=============================================================="
 python3 scripts/generate_report.py \
-    --reports-glob "outputs/experiments/${REPRODUCE_TAG}-s*/eval/report.json" \
+    --reports-glob "outputs/experiments/${REPRODUCE_TAG}/*-s*/eval/report.json" \
     --ledger-dir "$LEDGER_DIR" \
     --out-dir "$REPORTS_DIR" \
     --snapshot-id "$SNAPSHOT_ID"

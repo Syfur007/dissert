@@ -582,3 +582,82 @@ class EvaluationReporter:
 
         with open(path, "w") as fh:
             json.dump(data, fh, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Combined seed report
+# ---------------------------------------------------------------------------
+
+def aggregate_seed_reports(config: dict, report_paths, seeds) -> str:
+    """Average a set of per-seed eval reports (as written by
+    ``EvaluationReporter.save``) into one combined report, and write it to
+    ``orchestration.runid.experiment_paths(...)["combined_report"]``
+    (``{output_dir}/{experiment_name}/{experiment_name}.json``, adjacent to
+    every ``{hash7}-s{seed}/`` directory under that experiment_name).
+
+    Scope: averages (mean + std) only the ``metrics`` (flat scalar dict —
+    dice/miou/hd95/asd/precision/recall/specificity/f2/accuracy/...) and
+    ``per_class_metrics`` (elementwise over each metric's per-class list —
+    see ``metrics/aggregate.py``) blocks of each report. ``model``/
+    ``efficiency``/``environment``/``config`` are not averaged: ``model.*``
+    is constant across seeds of the same config, and
+    ``efficiency.*``/``environment.*`` describe the measuring run, not the
+    experiment's result.
+    """
+    from orchestration.runid import config_hash as _config_hash
+    from orchestration.runid import experiment_paths
+
+    reports = []
+    for p in report_paths:
+        with open(p) as fh:
+            reports.append(json.load(fh))
+
+    agg_metrics = {}
+    for key in reports[0].get("metrics", {}):
+        # Some metrics (e.g. fpr_on_normals/specificity_lesion_free — see
+        # metrics/aggregate.py) are legitimately None for a given seed's
+        # test set (no lesion-free images to compute them against, etc.).
+        # Excluded here the same way metrics/aggregate.py excludes an
+        # undefined per-image value from its own within-seed average.
+        values = [
+            r["metrics"][key] for r in reports
+            if r.get("metrics", {}).get(key) is not None
+        ]
+        if values:
+            agg_metrics[key] = {"mean": float(np.mean(values)), "std": float(np.std(values))}
+        else:
+            agg_metrics[key] = {"mean": None, "std": None}
+
+    agg_per_class = {}
+    for key in reports[0].get("per_class_metrics", {}):
+        arr = np.array([
+            r["per_class_metrics"][key] for r in reports if key in r.get("per_class_metrics", {})
+        ])  # (n_seeds, n_classes)
+        agg_per_class[key] = {
+            "mean": arr.mean(axis=0).tolist(),
+            "std": arr.std(axis=0).tolist(),
+        }
+
+    resolved_config_hash = _config_hash(config)
+    out = {
+        "experiment_name": config["logging"]["experiment_name"],
+        "config_hash": resolved_config_hash,
+        "n_seeds": len(reports),
+        "seeds": list(seeds),
+        "metrics": agg_metrics,
+        "per_class_metrics": agg_per_class,
+        "per_seed_reports": list(report_paths),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    out_path = experiment_paths(
+        config.get("output_dir", "outputs/experiments"),
+        config["logging"]["experiment_name"],
+        resolved_config_hash,
+        seeds[0],
+    )["combined_report"]
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as fh:
+        json.dump(out, fh, indent=2)
+
+    return out_path

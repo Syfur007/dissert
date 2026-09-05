@@ -1,4 +1,5 @@
 import os
+import copy
 import argparse
 import time
 import torch
@@ -10,12 +11,13 @@ from metrics import compute_dataset_metrics
 from models import get_model
 from datasets import StandardSplitDataModule
 from datasets.splits import TestLoaderGuardError
-from orchestration.runid import experiment_paths
+from orchestration.runid import config_hash as compute_config_hash, experiment_paths
 from profiling.flops import FlopsAgreementError, check_flops_agreement
 from profiling.latency import measure_latency
 from training.determinism import reset_recorded_nondeterminism, seed_everything
 from utils.config import load_config
 from utils.metrics import count_parameters
+from utils.report import aggregate_seed_reports
 from utils import (
     setup_logger,
     EvaluationReporter,
@@ -23,6 +25,11 @@ from utils import (
     save_roc_curve,
     save_pr_curve,
 )
+
+# Default multi-seed sweep — matches train.py's DEFAULT_SEEDS (kept as a
+# separate constant rather than importing train.py, to avoid pulling in
+# its training-only dependencies just for one literal).
+DEFAULT_SEEDS = [7, 42, 1337]
 
 
 class EnsembleModel(nn.Module):
@@ -134,7 +141,7 @@ def evaluate(model, dataloader, device, is_multiclass=False):
     return metrics, preds_list, gts_list, probs_list
 
 
-def main():
+def _parse_args():
     parser = argparse.ArgumentParser(description="Evaluate PyTorch Segmentation Model")
     parser.add_argument("--config",      type=str, default="configs/experiment/mkunet/mkunet_t_clinicdb.yaml")
     parser.add_argument("--checkpoint",  type=str, default=None)
@@ -146,10 +153,12 @@ def main():
     parser.add_argument("--test-token",  type=str, default=None,
                         help="Pre-minted test-evaluation token (see "
                              "orchestration.ledger.LedgerWriter.issue_test_token). "
-                             "Required to evaluate the test set unless --allow-test-eval is given.")
+                             "Required to evaluate the test set unless --allow-test-eval is given. "
+                             "Reused across every seed evaluated by this invocation.")
     parser.add_argument("--allow-test-eval", action="store_true",
-                        help="Mint a fresh test-evaluation token for this run (records a "
-                             "Test_Evals ledger row) instead of requiring a pre-minted --test-token.")
+                        help="Mint a fresh test-evaluation token per seed evaluated (each records "
+                             "its own Test_Evals ledger row) instead of requiring a pre-minted "
+                             "--test-token.")
     parser.add_argument("--experiment-name", type=str, default=None,
                         help="Override logging.experiment_name (and therefore both the log dir "
                              "and, unless --checkpoint is given explicitly, the checkpoint "
@@ -157,22 +166,28 @@ def main():
                              "scripts/reproduce.sh) point a run at a scoped name instead of "
                              "silently reusing — and overwriting the logs/report.json of — "
                              "whatever real experiment already used the config's own name.")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Override training.seed from the config. Since experiment_id is "
-                             "\"{experiment_name}-s{seed}\" (see orchestration.runid), this picks "
-                             "which seed's checkpoint/log/eval directory to evaluate — needed to "
-                             "evaluate anything but the config's own default seed, e.g. one "
-                             "particular seed of a multi-seed sweep.")
-    args = parser.parse_args()
+    seed_group = parser.add_mutually_exclusive_group()
+    seed_group.add_argument("--seed", type=int, default=None,
+                        help="Evaluate exactly this one seed, bypassing the default 3-seed sweep "
+                             "and combined report — e.g. to check one particular seed manually.")
+    seed_group.add_argument("--seeds", type=int, nargs="+", default=None,
+                        help=f"Evaluate exactly these seeds, then write the combined averaged "
+                             f"report (default: {DEFAULT_SEEDS}).")
+    return parser.parse_args()
 
-    config = load_config(args.config)
 
-    if args.dataset_dir is not None:
-        config['dataset']['root'] = args.dataset_dir
-    if args.experiment_name is not None:
-        config['logging']['experiment_name'] = args.experiment_name
-    if args.seed is not None:
-        config['training']['seed'] = args.seed
+def evaluate_one(config: dict, args, seed: int):
+    """Runs the full evaluation pipeline for one seed: resolves that
+    seed's checkpoint(s), evaluates on the test set, writes report.json/.md
+    under its eval/ dir.
+
+    Returns the report JSON path, or ``None`` if evaluation could not
+    proceed (missing test token/loader/checkpoint) — logged, not raised,
+    matching this module's existing "log it and return" style so one bad
+    seed doesn't take down the other 2 in a multi-seed call.
+    """
+    config = copy.deepcopy(config)
+    config['training']['seed'] = seed
 
     training_cfg = config['training']
     dataset_cfg  = config['dataset']
@@ -187,10 +202,11 @@ def main():
     # ── Output layout ──────────────────────────────────────────────────
     base_exp   = log_cfg['experiment_name']
     output_dir = config.get("output_dir", "outputs/experiments")
+    resolved_config_hash = compute_config_hash(config)
     # fold=None here: logs/ and eval/ are shared across all folds of this
     # experiment (same as train.py) — only the checkpoint *read* path below
     # is fold-scoped.
-    exp_paths = experiment_paths(output_dir, base_exp, training_cfg["seed"])
+    exp_paths = experiment_paths(output_dir, base_exp, resolved_config_hash, seed)
 
     # ── Logging ────────────────────────────────────────────────────────
     logger, exp_log_dir = setup_logger(exp_paths["logs"], "eval")
@@ -200,17 +216,17 @@ def main():
     # ── Test-loader guard token ────────────────────────────────────────
     # Touching the test set requires a token minted by
     # orchestration.ledger.LedgerWriter.issue_test_token() — either a
-    # pre-minted one (--test-token, e.g. from an orchestrated sweep) or a
-    # freshly self-issued one (--allow-test-eval, for a manual run); either
-    # way a Test_Evals ledger row is left behind.
+    # pre-minted one (--test-token, e.g. from an orchestrated sweep, reused
+    # across every seed this invocation evaluates) or a freshly self-issued
+    # one per seed (--allow-test-eval, for a manual run); either way a
+    # Test_Evals ledger row is left behind.
     if args.test_token:
         test_token = args.test_token
     elif args.allow_test_eval:
         from orchestration.ledger import LedgerWriter
-        from orchestration.runid import config_hash as _config_hash
         test_token = LedgerWriter().issue_test_token(
-            run_id=f"manual-eval-{log_cfg['experiment_name']}",
-            config_hash=_config_hash(config),
+            run_id=f"manual-eval-{base_exp}-s{seed}",
+            config_hash=resolved_config_hash,
         )
     else:
         logger.error(
@@ -218,7 +234,7 @@ def main():
             "orchestrated sweep) or --allow-test-eval (mints one for this "
             "manual run). Refusing to proceed without a recorded test-eval token."
         )
-        return
+        return None
 
     # Init Datamodule
     dm = StandardSplitDataModule(config)
@@ -226,11 +242,11 @@ def main():
         test_loader = dm.get_test_loader(test_token)
     except TestLoaderGuardError as exc:
         logger.error(str(exc))
-        return
+        return None
 
     if test_loader is None:
         logger.error("No test set filenames or separate test directory was found in configuration.")
-        return
+        return None
 
     logger.info(f"Test samples found: {len(test_loader.dataset)}")
 
@@ -242,7 +258,7 @@ def main():
     # Determine which checkpoints to load. Checkpoints are fold-scoped
     # (checkpoints/fold{N}/best.pth) — resolve per-fold below.
     def _checkpoints_dir(fold=None):
-        return experiment_paths(output_dir, base_exp, training_cfg["seed"], fold)["checkpoints"]
+        return experiment_paths(output_dir, base_exp, resolved_config_hash, seed, fold)["checkpoints"]
 
     if args.ensemble:
         # Load all fold checkpoints for ensembling
@@ -264,7 +280,7 @@ def main():
 
         if not fold_models:
             logger.error("No fold checkpoints could be loaded for ensembling.")
-            return
+            return None
 
         model = EnsembleModel(fold_models).to(device)
     else:
@@ -281,7 +297,7 @@ def main():
 
         if not os.path.exists(chk_path):
             logger.error(f"Checkpoint file not found: {chk_path}")
-            return
+            return None
 
         logger.info(f"Loading weights from checkpoint: {chk_path}")
         model = load_checkpoint_into(model, chk_path, device, logger)
@@ -400,6 +416,47 @@ def main():
         report_dir      = exp_paths["eval"],
         # filename_prefix = log_cfg['experiment_name'],
     )
+
+    ensemble_tag = "ensemble_" if args.ensemble else ""
+    return os.path.join(exp_paths["eval"], f"{ensemble_tag}report.json")
+
+
+def main():
+    args = _parse_args()
+    config = load_config(args.config)
+
+    if args.dataset_dir is not None:
+        config['dataset']['root'] = args.dataset_dir
+    if args.experiment_name is not None:
+        config['logging']['experiment_name'] = args.experiment_name
+
+    if args.seed is not None:
+        # Single explicit seed — bypasses the default sweep and combined
+        # report entirely.
+        evaluate_one(config, args, args.seed)
+        return
+
+    # Default: evaluate every seed in DEFAULT_SEEDS (or --seeds), in
+    # process, then write a combined seed-averaged report adjacent to the
+    # per-seed eval/ directories.
+    seeds = args.seeds or DEFAULT_SEEDS
+    evaluated = []
+    for s in seeds:
+        report_path = evaluate_one(config, args, s)
+        if report_path is not None:
+            evaluated.append((s, report_path))
+
+    if not evaluated:
+        print("No seed evaluation succeeded — skipping combined report.")
+        return
+    if len(evaluated) < len(seeds):
+        print(f"Only {len(evaluated)}/{len(seeds)} seed evals succeeded; "
+              f"combined report covers just those.")
+
+    combined_path = aggregate_seed_reports(
+        config, [p for _, p in evaluated], [s for s, _ in evaluated]
+    )
+    print(f"Combined report ({len(evaluated)} seed(s)) → {combined_path}")
 
 
 if __name__ == "__main__":

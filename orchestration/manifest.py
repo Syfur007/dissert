@@ -2,7 +2,7 @@
 Run manifest: the single artifact that explains how a run's checkpoints/logs
 came to exist — resolved config, config hash, code version, environment,
 hardware, timing — written to
-outputs/experiments/<experiment_name>-s<seed>/checkpoints/fold<N>/manifest.json
+outputs/experiments/<experiment_name>/<config_hash7>-s<seed>/checkpoints/fold<N>/manifest.json
 (orchestration.runner.run_sweep's per-(seed, fold) provenance file,
 co-located with that fold's checkpoints).
 
