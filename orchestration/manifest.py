@@ -123,6 +123,7 @@ class RunManifest:
         resolved_config: Dict[str, Any],
         seed: int,
         fold: Optional[int] = None,
+        repeat: Optional[int] = None,
         repo_root: Optional[str] = None,
     ):
         self.data: Dict[str, Any] = {
@@ -131,6 +132,7 @@ class RunManifest:
             "resolved_config": resolved_config,
             "seed": seed,
             "fold": fold,
+            "repeat": repeat,
             "git": _git_info(repo_root),
             "env_hash": _env_hash(),
             "hardware": _hardware_info(),
@@ -191,8 +193,9 @@ def build_manifest(
     resolved_config: Dict[str, Any],
     seed: int,
     fold: Optional[int] = None,
+    repeat: Optional[int] = None,
     repo_root: Optional[str] = None,
 ) -> RunManifest:
     """Construct a RunManifest for one run. Caller drives start()/finish()/save()
     around the actual training/eval call — this function itself performs no I/O."""
-    return RunManifest(run_id, resolved_config, seed, fold, repo_root)
+    return RunManifest(run_id, resolved_config, seed, fold, repeat, repo_root)

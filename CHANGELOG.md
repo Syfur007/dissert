@@ -863,3 +863,46 @@ as such, not a claim of matching a specific paper.
   empty-parametrize placeholder, not a real skip) skipped, repo-wide (286 prior + 9 + 15 new). `pip
   check` clean. Real-pipeline regression check unchanged (`gmkunet_t_clinicdb` still Dice 0.7816 /
   mIoU 0.6881 — reconfirmed after the accidental overwrite above).
+
+## Phase 15 — Repeat axis: same-seed noise reduction for train + eval (2026-09-06)
+
+- **New repeat axis, on top of the existing seed axis**: each of `train.py`/`eval.py`'s default
+  swept seeds (`DEFAULT_SEEDS = [7, 42, 1337]`) is now also independently re-run `DEFAULT_REPEATS = 3`
+  times by default (`--repeats N` to override; `--seed` bypasses repeats entirely, same as it already
+  bypasses the seed sweep). Every repeat re-seeds *identically* to the same seed value — the point is
+  to measure/average out whatever noise survives fixed seeding (residual hardware/kernel
+  non-determinism — cudnn, `mamba-ssm`'s fused kernel — see `training/determinism.py`), as distinct
+  from the seed axis's deliberate model-init/data-order variance.
+- **`repeat` is a pure runtime/path parameter, never a config field** — modeled exactly on how `fold`
+  already works in this codebase (`orchestration/runid.py`'s own docstring already called this out for
+  fold). `orchestration.runid.experiment_id()`/`run_id()`/`experiment_paths()` all gained an optional
+  `repeat: Optional[int] = None` parameter, appended after `fold` for full positional-call backward
+  compatibility; `repeat=None` (the default) reproduces the exact legacy unsuffixed path/run_id format.
+  When given, `experiment_id` becomes `"{hash7}-s{seed}-r{repeat}"` — every repeat gets its own
+  complete, independent checkpoints/logs/tensorboard/plots/eval tree, exactly like every seed does.
+  Nothing needed stripping from `config_hash` — repeat was never part of the config dict to begin
+  with, so there's nothing there to strip.
+- **Two-level noise reduction, symmetric with the existing seed-averaging**: `utils/report.py`'s
+  mean/std core (previously inlined in `aggregate_seed_reports`) is now factored into a shared
+  `_aggregate_metric_reports()`, used by both the existing `aggregate_seed_reports` (unchanged
+  signature/output) and a new `aggregate_repeat_reports()`, which averages one seed's `n_repeats`
+  independent eval reports into a new sibling file, `{hash7}-s{seed}.json`
+  (`orchestration.runid.experiment_paths(...)["seed_combined_report"]`). `eval.py`'s default sweep now
+  aggregates repeats within a seed first, then feeds those already-denoised per-seed reports into the
+  existing across-seed aggregation — `aggregate_seed_reports` itself needed no change, since it only
+  ever reads the same `metrics`/`per_class_metrics` keys regardless of which kind of report it's given.
+- **`orchestration.runner.run_sweep`** gained a `repeats: Sequence[Optional[int]] = (None,)` parameter,
+  nesting `seeds x repeats x folds` — the existing idempotent-skip (manifest `status: "done"`) and
+  per-combination try/except generalise to the new axis with no further changes. `orchestration.ledger`'s
+  Runs table gained a `repeat` column; `orchestration.manifest.RunManifest`/`build_manifest` gained a
+  `repeat` field; `orchestration.runid.check_and_record_run_meta` records `repeat` in `run_meta.json`
+  too.
+- **New tests**: `tests/test_orchestration.py` (`run_id`/`experiment_id`/`experiment_paths` repeat-suffix
+  format, `run_sweep`'s repeat axis — distinct run_ids, ledger `repeat` column, idempotent re-skip) and
+  a new `tests/test_report_aggregation.py` (`aggregate_repeat_reports`, and `aggregate_seed_reports`
+  consuming repeat-combined reports — neither function had dedicated tests before this phase).
+  `tests/test_orchestration.py::test_run_sweep_idempotent_skip`'s `fake_train` stub updated to accept
+  the new `repeat` kwarg that `run_sweep` now always passes through.
+- **Docs**: `OUTPUT_LAYOUT.md` updated — target layout tree, old→new mapping's ledger row, the
+  `experiment_id` format, and the shared-siblings section (now three files: `fold_splits.json`, the new
+  `{hash7}-s{seed}.json`, and `{experiment_name}.json`).

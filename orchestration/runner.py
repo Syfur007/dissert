@@ -36,11 +36,14 @@ TrainFn = Callable[..., float]
 
 
 def _manifest_path(
-    output_dir: str, experiment_name: str, config_hash_: str, seed: int, fold: Optional[int]
+    output_dir: str, experiment_name: str, config_hash_: str, seed: int,
+    fold: Optional[int], repeat: Optional[int] = None,
 ) -> str:
     # Co-located with that fold's checkpoints — the same directory
     # train.py's CheckpointManager writes best.pth/last.pth into.
-    checkpoints_dir = experiment_paths(output_dir, experiment_name, config_hash_, seed, fold)["checkpoints"]
+    checkpoints_dir = experiment_paths(
+        output_dir, experiment_name, config_hash_, seed, fold, repeat,
+    )["checkpoints"]
     return os.path.join(checkpoints_dir, "manifest.json")
 
 
@@ -66,12 +69,13 @@ def run_sweep(
     resolved_config: Dict[str, Any],
     seeds: Sequence[int],
     folds: Sequence[Optional[int]] = (None,),
+    repeats: Sequence[Optional[int]] = (None,),
     train_fn: Optional[TrainFn] = None,
     ledger_dir: str = "outputs/ledger",
     force: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run *train_fn* (defaults to ``train.run_training``) once per
-    ``seeds x folds`` combination.
+    ``seeds x repeats x folds`` combination.
 
     Args:
         resolved_config: an already-validated config dict (see
@@ -79,6 +83,14 @@ def run_sweep(
         seeds: seeds to sweep.
         folds: fold indices to sweep; ``(None,)`` (the default) means a
             single non-CV run per seed.
+        repeats: repeat indices to sweep per seed; ``(None,)`` (the
+            default) means a single, non-repeated run per seed — same
+            "index or None" convention as *folds*. Each repeat re-seeds
+            *identically* to the same seed (train_fn does this, not this
+            loop) and gets its own independent
+            checkpoints/logs/tensorboard/plots/eval tree — the point is to
+            measure/average out whatever noise survives fixed seeding
+            (hardware/kernel non-determinism), not to vary anything.
         train_fn: injectable for testing; defaults to a lazy import of
             ``train.run_training`` (kept lazy so importing this module never
             drags in torch/train.py's full dependency chain).
@@ -100,63 +112,65 @@ def run_sweep(
     experiment_name = resolved_config.get("logging", {}).get("experiment_name", "experiment")
 
     for seed in seeds:
-        for fold in folds:
-            rid = compute_run_id(h, seed=seed, fold=fold)
-            mpath = _manifest_path(output_dir, experiment_name, h, seed, fold)
+        for repeat in repeats:
+            for fold in folds:
+                rid = compute_run_id(h, seed=seed, fold=fold, repeat=repeat)
+                mpath = _manifest_path(output_dir, experiment_name, h, seed, fold, repeat)
 
-            if not force and _existing_status(mpath) == "done":
+                if not force and _existing_status(mpath) == "done":
+                    results.append(
+                        {"run_id": rid, "status": "skipped-done", "best_metric": None, "error": None}
+                    )
+                    continue
+
+                run_config = _with_seed(resolved_config, seed)
+                manifest = build_manifest(rid, run_config, seed=seed, fold=fold, repeat=repeat)
+                manifest.start()
+                reset_recorded_nondeterminism()
+
+                status, best_metric, error = "failed", None, None
+                try:
+                    best_metric = train_fn(run_config, fold=fold, run_id=rid, repeat=repeat)
+                    status = "done"
+                except Exception as exc:  # noqa: BLE001 — one bad run must not kill the sweep
+                    error = str(exc)
+                    status = "failed"
+                finally:
+                    for note in get_recorded_nondeterminism():
+                        manifest.record_nondeterminism(note)
+                    for key, value in get_recorded_manifest_extras().items():
+                        manifest.record(key, value)
+                    manifest.finish(status=status, error=error)
+                    manifest.save(mpath)
+
+                    log_cfg = run_config.get("logging", {})
+                    model_cfg = run_config.get("model", {})
+                    dataset_cfg = run_config.get("dataset", {})
+                    chk_cfg = run_config.get("checkpoint", {})
+                    git = manifest.data["git"]
+
+                    ledger.append_run_row(
+                        run_id=rid,
+                        config_hash=h,
+                        experiment_name=log_cfg.get("experiment_name", ""),
+                        model_name=model_cfg.get("name", ""),
+                        dataset_name=dataset_cfg.get("name", ""),
+                        seed=seed,
+                        repeat=repeat if repeat is not None else "",
+                        fold=fold if fold is not None else "",
+                        status=status,
+                        start_time=manifest.data["start_time"],
+                        end_time=manifest.data["end_time"],
+                        gpu_hours=manifest.data.get("gpu_hours") or "",
+                        best_metric=best_metric if best_metric is not None else "",
+                        monitor_metric=chk_cfg.get("monitor_metric", ""),
+                        git_commit=git.get("commit") or "",
+                        git_dirty=git.get("dirty"),
+                        manifest_path=mpath,
+                    )
+
                 results.append(
-                    {"run_id": rid, "status": "skipped-done", "best_metric": None, "error": None}
+                    {"run_id": rid, "status": status, "best_metric": best_metric, "error": error}
                 )
-                continue
-
-            run_config = _with_seed(resolved_config, seed)
-            manifest = build_manifest(rid, run_config, seed=seed, fold=fold)
-            manifest.start()
-            reset_recorded_nondeterminism()
-
-            status, best_metric, error = "failed", None, None
-            try:
-                best_metric = train_fn(run_config, fold=fold, run_id=rid)
-                status = "done"
-            except Exception as exc:  # noqa: BLE001 — one bad run must not kill the sweep
-                error = str(exc)
-                status = "failed"
-            finally:
-                for note in get_recorded_nondeterminism():
-                    manifest.record_nondeterminism(note)
-                for key, value in get_recorded_manifest_extras().items():
-                    manifest.record(key, value)
-                manifest.finish(status=status, error=error)
-                manifest.save(mpath)
-
-                log_cfg = run_config.get("logging", {})
-                model_cfg = run_config.get("model", {})
-                dataset_cfg = run_config.get("dataset", {})
-                chk_cfg = run_config.get("checkpoint", {})
-                git = manifest.data["git"]
-
-                ledger.append_run_row(
-                    run_id=rid,
-                    config_hash=h,
-                    experiment_name=log_cfg.get("experiment_name", ""),
-                    model_name=model_cfg.get("name", ""),
-                    dataset_name=dataset_cfg.get("name", ""),
-                    seed=seed,
-                    fold=fold if fold is not None else "",
-                    status=status,
-                    start_time=manifest.data["start_time"],
-                    end_time=manifest.data["end_time"],
-                    gpu_hours=manifest.data.get("gpu_hours") or "",
-                    best_metric=best_metric if best_metric is not None else "",
-                    monitor_metric=chk_cfg.get("monitor_metric", ""),
-                    git_commit=git.get("commit") or "",
-                    git_dirty=git.get("dirty"),
-                    manifest_path=mpath,
-                )
-
-            results.append(
-                {"run_id": rid, "status": status, "best_metric": best_metric, "error": error}
-            )
 
     return results

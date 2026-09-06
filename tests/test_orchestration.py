@@ -21,7 +21,7 @@ import torch
 
 from orchestration.ledger import LedgerWriter
 from orchestration.manifest import build_manifest
-from orchestration.runid import config_hash, experiment_paths, run_id
+from orchestration.runid import config_hash, experiment_id, experiment_paths, run_id
 from orchestration.runner import run_sweep
 from orchestration.schema import validate_config
 from train import run_training
@@ -143,6 +143,38 @@ def test_run_id_format(tiny_config):
     h = config_hash(tiny_config)
     assert run_id(h, seed=7, fold=2) == f"R-{h[:7]}-s7-f2"
     assert run_id(h, seed=7, fold=None) == f"R-{h[:7]}-s7-f-"  # non-CV run
+    # repeat=None (default) omits the repeat segment entirely — same
+    # historical format as above, unaffected by the repeat feature existing.
+    assert run_id(h, seed=7, fold=2, repeat=None) == f"R-{h[:7]}-s7-f2"
+
+
+def test_run_id_format_with_repeat(tiny_config):
+    h = config_hash(tiny_config)
+    assert run_id(h, seed=7, fold=2, repeat=1) == f"R-{h[:7]}-s7-r1-f2"
+    assert run_id(h, seed=7, fold=None, repeat=0) == f"R-{h[:7]}-s7-r0-f-"
+
+
+def test_experiment_id_and_paths_with_repeat(tiny_config):
+    h = config_hash(tiny_config)
+    assert experiment_id(h, seed=7) == f"{h[:7]}-s7"  # unaffected, repeat=None
+    assert experiment_id(h, seed=7, repeat=2) == f"{h[:7]}-s7-r2"
+
+    paths_no_repeat = experiment_paths("outputs/experiments", "exp", h, 7)
+    paths_r0 = experiment_paths("outputs/experiments", "exp", h, 7, repeat=0)
+    paths_r1 = experiment_paths("outputs/experiments", "exp", h, 7, repeat=1)
+
+    # Each repeat gets its own independent root — never collides with the
+    # legacy unsuffixed path or with another repeat.
+    assert len({paths_no_repeat["root"], paths_r0["root"], paths_r1["root"]}) == 3
+    assert paths_r0["checkpoints"] != paths_r1["checkpoints"]
+
+    # fold_splits and combined_report stay shared across seeds *and*
+    # repeats — never scoped into any one repeat's root.
+    assert paths_r0["fold_splits"] == paths_r1["fold_splits"] == paths_no_repeat["fold_splits"]
+    assert paths_r0["combined_report"] == paths_r1["combined_report"] == paths_no_repeat["combined_report"]
+    # seed_combined_report is per-seed (shared across that seed's repeats),
+    # not per-repeat.
+    assert paths_r0["seed_combined_report"] == paths_r1["seed_combined_report"]
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +230,7 @@ def test_ledger_rejects_unknown_field(tmp_path):
 def test_run_sweep_idempotent_skip(tmp_path, tiny_config):
     calls = []
 
-    def fake_train(config, fold=None, run_id=None):
+    def fake_train(config, fold=None, run_id=None, repeat=None):
         calls.append(run_id)
         return 0.42
 
@@ -217,6 +249,41 @@ def test_run_sweep_idempotent_skip(tmp_path, tiny_config):
     )
     assert all(r["status"] == "skipped-done" for r in results_2)
     assert len(calls) == 2  # fake_train not called again
+
+
+def test_run_sweep_repeats_axis(tmp_path, tiny_config):
+    """Each (seed, repeat) combination gets its own run_id/manifest — a
+    repeat is never mistaken for "already done" by another repeat of the
+    same seed, and the ledger records which repeat index produced each row."""
+    calls = []
+
+    def fake_train(config, fold=None, run_id=None, repeat=None):
+        calls.append((run_id, repeat))
+        return 0.42
+
+    ledger_dir = str(tmp_path / "ledger")
+
+    results = run_sweep(
+        tiny_config, seeds=[0], folds=[None], repeats=[0, 1, 2],
+        train_fn=fake_train, ledger_dir=ledger_dir,
+    )
+    assert all(r["status"] == "done" for r in results)
+    assert len(calls) == 3
+    assert len({rid for rid, _ in calls}) == 3  # every repeat gets a distinct run_id
+
+    with open(os.path.join(ledger_dir, "runs.csv")) as f:
+        import csv
+        rows = list(csv.DictReader(f))
+    assert sorted(row["repeat"] for row in rows) == ["0", "1", "2"]
+
+    # Re-running with the same repeats is a full no-op — same idempotent
+    # skip as the seed/fold axes already have.
+    results_2 = run_sweep(
+        tiny_config, seeds=[0], folds=[None], repeats=[0, 1, 2],
+        train_fn=fake_train, ledger_dir=ledger_dir,
+    )
+    assert all(r["status"] == "skipped-done" for r in results_2)
+    assert len(calls) == 3
 
 
 # ---------------------------------------------------------------------------

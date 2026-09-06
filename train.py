@@ -60,7 +60,7 @@ from utils import (
 # Per-fold training run
 # ---------------------------------------------------------------------------
 
-def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float:
+def run_training(config: dict, fold=None, run_id: Optional[str] = None, repeat: Optional[int] = None) -> float:
     """Build all components and run Trainer.fit() for one fold (or non-CV run).
 
     Args:
@@ -70,6 +70,13 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
             from the config + seed + fold when not supplied, so a bare
             ``python train.py`` still produces addressable checkpoints, not
             just runs launched through orchestration.runner.
+        repeat: Nth identical re-run of this (config_hash, seed) — same
+            seed re-seeded identically, run again to measure/average out
+            whatever noise survives fixed seeding (hardware/kernel
+            non-determinism — see training/determinism.py). ``None``
+            (default) is a single, non-repeated run — the historical
+            behavior, same directory as before. Never stored in *config*
+            itself, same as *fold*.
 
     Returns:
         Best monitored metric value.
@@ -88,17 +95,17 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     # ── Run identity ───────────────────────────────────────────────────
     resolved_config_hash = config_hash(config)
     resolved_run_id = run_id or compute_run_id(
-        resolved_config_hash, seed=training_cfg["seed"], fold=fold
+        resolved_config_hash, seed=training_cfg["seed"], fold=fold, repeat=repeat,
     )
 
     # ── Output layout ──────────────────────────────────────────────────
-    # {output_dir}/{experiment_name}/{hash7}-s{seed}/ — the one atomic,
-    # self-contained directory for this (config_hash, seed), shared by
-    # every fold. See orchestration/runid.py:experiment_paths().
+    # {output_dir}/{experiment_name}/{hash7}-s{seed}[-r{repeat}]/ — the one
+    # atomic, self-contained directory for this (config_hash, seed[, repeat]),
+    # shared by every fold. See orchestration/runid.py:experiment_paths().
     base_exp = log_cfg['experiment_name']          # e.g. mkunet_t_clinicdb
     paths = experiment_paths(
         config.get("output_dir", "outputs/experiments"), base_exp,
-        resolved_config_hash, training_cfg["seed"], fold,
+        resolved_config_hash, training_cfg["seed"], fold, repeat,
     )
 
     # ── Logging ────────────────────────────────────────────────────────
@@ -109,7 +116,8 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
     logger, exp_log_dir = setup_logger(paths["logs"], log_filename)
     logger.info(f"Using device: {device}")
     check_and_record_run_meta(
-        paths["run_meta"], base_exp, training_cfg["seed"], resolved_config_hash, logger=logger,
+        paths["run_meta"], base_exp, training_cfg["seed"], resolved_config_hash,
+        repeat=repeat, logger=logger,
     )
     logger.info(f"Experiment log dir: {exp_log_dir}")
 
@@ -377,6 +385,12 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None) -> float
 # evaluates every experiment on all 3 by default (see SESSION_GROUPING_PLAN.md).
 DEFAULT_SEEDS = [7, 42, 1337]
 
+# Default repeat count — each swept seed is independently re-run this many
+# times (re-seeded identically each time) to measure/average out whatever
+# noise survives fixed seeding (hardware/kernel non-determinism — see
+# training/determinism.py), on top of DEFAULT_SEEDS' across-seed variance.
+DEFAULT_REPEATS = 3
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train PyTorch Segmentation Pipeline")
@@ -388,6 +402,9 @@ def parse_args():
                         help="Run exactly this one seed, bypassing the default 3-seed sweep.")
     seed_group.add_argument("--seeds", type=int, nargs="+", default=None,
                         help=f"Run exactly these seeds via run_sweep (default: {DEFAULT_SEEDS}).")
+    parser.add_argument("--repeats",         type=int,   default=None,
+                        help=f"Number of identical re-runs per seed via run_sweep "
+                             f"(default: {DEFAULT_REPEATS}). Ignored when --seed bypasses the sweep.")
     parser.add_argument("--force",           action="store_true",
                         help="Re-run seeds whose manifest already reports status=done.")
     parser.add_argument("--resume",          action="store_true")
@@ -485,6 +502,11 @@ def main():
     from orchestration.runner import run_sweep
 
     seeds = args.seeds or DEFAULT_SEEDS
+    n_repeats = args.repeats if args.repeats is not None else DEFAULT_REPEATS
+    # n_repeats<=1 means "no repeat axis" — same (None,) convention folds
+    # already uses, keeping the unsuffixed legacy path when repeats aren't
+    # actually in use.
+    repeats = (None,) if n_repeats <= 1 else list(range(n_repeats))
     if args.fold is not None:
         folds = (args.fold,)
     elif kfold_cfg.get("enabled", False):
@@ -493,8 +515,8 @@ def main():
     else:
         folds = (None,)
 
-    print(f"Training {len(seeds)} seed(s) {seeds} x {len(folds)} fold(s) {list(folds)}...")
-    results = run_sweep(config, seeds=seeds, folds=folds, force=args.force)
+    print(f"Training {len(seeds)} seed(s) {seeds} x {len(repeats)} repeat(s) x {len(folds)} fold(s) {list(folds)}...")
+    results = run_sweep(config, seeds=seeds, folds=folds, repeats=repeats, force=args.force)
     for r in results:
         print(f"run_id={r['run_id']} status={r['status']} "
               f"best_metric={r['best_metric']} error={r['error']}")

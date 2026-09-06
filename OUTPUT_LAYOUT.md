@@ -13,12 +13,21 @@ seed instead) — see `SESSION_GROUPING_PLAN.md`. Cross-validation
 specific experiment, all 3 seeds train/validate on the *same* fold
 partition (only model-init/training randomness varies across seeds).
 
+On top of that seed axis, each swept seed is by default also re-run 3
+times (`--repeats N` to override, `--seed` bypasses repeats entirely):
+same seed, re-seeded identically each time, to measure/average out
+whatever noise survives fixed seeding — residual hardware/kernel
+non-determinism (`training/determinism.py` — cudnn, fused kernels like
+`mamba-ssm`'s), as distinct from the seed axis's deliberate model-init/
+data-order variance. `repeat` is never part of the config dict, same as
+`fold` — it's a pure runtime/path parameter.
+
 ## Target layout
 
 ```
 outputs/experiments/<experiment_name>/
-├── <hash7>-fold_splits.json     # K-fold only; shared across all seeds of this config_hash
-├── <hash7>-s<seed>/             # experiment_id = "{config_hash[:7]}-s{seed}"
+├── <hash7>-fold_splits.json     # K-fold only; shared across all seeds AND repeats of this config_hash
+├── <hash7>-s<seed>-r0/          # experiment_id = "{config_hash[:7]}-s{seed}-r{repeat}"
 │   ├── run_meta.json            # {experiment_name, seed, config_hash, created_at}
 │   ├── checkpoints/
 │   │   └── fold0/               # omitted (files directly under checkpoints/) for non-CV runs
@@ -40,14 +49,23 @@ outputs/experiments/<experiment_name>/
 │       ├── report.json          # or ensemble_report.json with --ensemble
 │       ├── report.md
 │       └── curves/{confusion_matrix,roc_curve,pr_curve}.png
-├── <hash7>-s<seed2>/             # same shape, one per swept seed
-├── <hash7>-s<seed3>/
-└── <experiment_name>.json        # combined report: mean±std of eval metrics over all swept seeds
+├── <hash7>-s<seed>-r1/            # same shape, one per repeat of this seed
+├── <hash7>-s<seed>-r2/
+├── <hash7>-s<seed>.json           # seed_combined_report: mean±std over that seed's repeats
+├── <hash7>-s<seed2>-r0/           # same shape, one per (seed, repeat) combination swept
+├── ...
+└── <experiment_name>.json        # combined report: mean±std over all swept seeds' <hash7>-s<seed>.json
 
 outputs/ledger/{runs,compute,test_evals,stats}.csv
 outputs/searches/{search,search_test}/{best_config.yaml,search_summary.csv,search_report.md}
 outputs/reports/{main_comparison,efficiency}.{csv,tex}
 ```
+
+Repeats are opt-out, not opt-in: `--repeats 1` (or `--seed`, which bypasses
+the whole apparatus) drops the `-r{repeat}` suffix entirely, landing back
+on the exact legacy `<hash7>-s<seed>/` layout above with no
+`<hash7>-s<seed>.json` file — same `(None,)` "axis not in use" convention
+`fold` already has.
 
 The one source of truth for this layout in code is
 `orchestration/runid.py`'s `experiment_id()` / `experiment_paths()` —
@@ -67,15 +85,19 @@ itself.
 | `experiments/<experiment_name>-s<seed>/eval/report.{json,md}` | `experiments/<experiment_name>/<hash7>-s<seed>/eval/report.{json,md}` |
 | `experiments/<experiment_name>-s<seed>/fold_splits.json` (per seed) | `experiments/<experiment_name>/<hash7>-fold_splits.json` (shared across all seeds of that hash — see below) |
 | — (didn't exist) | `experiments/<experiment_name>/<experiment_name>.json` — combined, seed-averaged eval report |
-| `artifacts/ledger/*.csv` | `ledger/*.csv` (same CSV schemas, unchanged — still a flat, global, cross-experiment index, never nested per-experiment) |
+| `artifacts/ledger/*.csv` | `ledger/*.csv` (Runs table gains a `repeat` column, empty string when repeats aren't in use — still a flat, global, cross-experiment index, never nested per-experiment) |
 | `search_results/`, `search_test_results/` | `searches/search/`, `searches/search_test/` — sweep-level aggregates only; each trial is a full experiment at `experiments/<trial_name>/<hash7>-s<seed>/` |
 | `reports/tables/*.{csv,tex}` | `reports/*.{csv,tex}` |
 
 ## New identifier: `experiment_id`
 
-`experiment_id = "{config_hash[:7]}-s{seed}"`, nested one level under
-`experiment_name` — the one atomic, self-contained directory for a given
-(config_hash, seed), shared by every fold trained within it.
+`experiment_id = "{config_hash[:7]}-s{seed}[-r{repeat}]"`, nested one
+level under `experiment_name` — the one atomic, self-contained directory
+for a given (config_hash, seed[, repeat]), shared by every fold trained
+within it. `repeat` (like `fold`) is never part of the config dict itself
+— a pure runtime/path parameter — so it needs no `config_hash` stripping;
+the `-r{repeat}` segment is simply omitted when `repeat is None` (repeats
+not in use for this run).
 
 `config_hash` (`orchestration.runid.config_hash`) strips only
 bookkeeping/presentation fields — `training.seed`, the whole `logging`
@@ -99,25 +121,37 @@ on a truncated-hash collision (two different full hashes sharing the same
 first 7 hex chars), not on a genuine reconfiguration — that case is
 structurally impossible to collide anymore.
 
-## Shared fold splits, seed-averaged report
+## Shared fold splits, repeat-averaged and seed-averaged reports
 
-Two files live directly under `experiments/<experiment_name>/`, siblings
-to every `<hash7>-s<seed>/` directory rather than inside one:
+Three files live directly under `experiments/<experiment_name>/`,
+siblings to every `<hash7>-s<seed>[-r<repeat>]/` directory rather than
+inside one:
 
 - **`<hash7>-fold_splits.json`** (K-fold only) — the train/val partition
   for each fold, computed once per config_hash and reused by every seed
-  swept under it (`datasets.datamodule.KFoldDataModule`). Its `KFold`
-  `random_state` is derived from `config_hash`, not `training.seed`, so
-  this is deterministic and reproducible independent of which seed runs
-  first.
+  *and repeat* swept under it (`datasets.datamodule.KFoldDataModule`). Its
+  `KFold` `random_state` is derived from `config_hash`, not `training.seed`
+  (and not repeat at all), so this is deterministic and reproducible
+  independent of which seed/repeat runs first.
+- **`<hash7>-s<seed>.json`** (repeats only) — written by `eval.py`'s
+  default multi-repeat path (`utils.report.aggregate_repeat_reports`)
+  after all of one seed's repeats are evaluated: mean ± std, per metric,
+  over that seed's `n_repeats` independent `eval/report.json` files. This
+  is the inner half of two-level noise reduction — it isolates whatever
+  noise survives *fixed* seeding (hardware/kernel non-determinism), as
+  distinct from the seed axis's deliberate variance. Absent when repeats
+  aren't in use (`--repeats 1` or `--seed`).
 - **`<experiment_name>.json`** — written by `eval.py`'s default multi-seed
   path (`utils.report.aggregate_seed_reports`) after all swept seeds are
-  evaluated: mean ± std, per metric, over each seed's `eval/report.json`
-  (`metrics` + `per_class_metrics` blocks only — `model`/`efficiency`/
-  `environment` aren't averaged). Overwritten on every re-sweep under the
+  evaluated: mean ± std, per metric, over each seed's report (its raw
+  `eval/report.json` when repeats aren't in use, or its repeat-averaged
+  `<hash7>-s<seed>.json` above when they are — `metrics` +
+  `per_class_metrics` blocks only; `model`/`efficiency`/`environment`
+  aren't averaged either level). Overwritten on every re-sweep under the
   same experiment_name — if that name is later re-run under a different
-  config_hash, its old `<hash7>-s<seed>/` directories stay on disk, but
-  only the most recent hash's combined report survives at this path.
+  config_hash, its old `<hash7>-s<seed>[-r<repeat>]/` directories stay on
+  disk, but only the most recent hash's combined report survives at this
+  path.
 
 ## Listing "experiments"
 
@@ -128,7 +162,7 @@ own, now two levels deep: each top-level entry is one `experiment_name`
 (a group of seed runs, potentially spanning more than one `config_hash`
 if the name was reused across a config change), and each child directory
 is one `experiment_id`, with `run_meta.json` inside giving
-`experiment_name`/`seed`/`config_hash` directly.
+`experiment_name`/`seed`/`repeat`/`config_hash` directly.
 
 ## Config knob
 

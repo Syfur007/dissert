@@ -57,22 +57,36 @@ def config_hash(resolved_config: Dict[str, Any]) -> str:
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
 
 
-def run_id(config_hash_: str, seed: int, fold: Optional[int] = None) -> str:
-    """``R-{hash[:7]}-s{seed}-f{fold}``. For a non-CV run (``fold is None``),
-    the fold segment reads ``f-`` rather than the literal string "None"."""
+def run_id(config_hash_: str, seed: int, fold: Optional[int] = None, repeat: Optional[int] = None) -> str:
+    """``R-{hash[:7]}-s{seed}-r{repeat}-f{fold}``. For a non-CV run
+    (``fold is None``), the fold segment reads ``f-`` rather than the
+    literal string "None". The repeat segment is omitted entirely when
+    ``repeat is None`` (a single, non-repeated run — the historical
+    format), same convention as ``fold``."""
     fold_part = fold if fold is not None else "-"
-    return f"R-{config_hash_[:7]}-s{seed}-f{fold_part}"
+    repeat_part = f"-r{repeat}" if repeat is not None else ""
+    return f"R-{config_hash_[:7]}-s{seed}{repeat_part}-f{fold_part}"
 
 
-def experiment_id(config_hash_: str, seed: int) -> str:
+def experiment_id(config_hash_: str, seed: int, repeat: Optional[int] = None) -> str:
     """The atomic on-disk unit within one experiment_name: one
-    (config_hash, seed) pair, shared by every fold of that run. Unlike the
-    old ``{experiment_name}-s{seed}`` scheme, the hash is now part of the
-    identifier itself — a config change (anything ``config_hash`` doesn't
-    strip) lands in a fresh directory instead of silently reusing an old
-    one, so ``--resume`` only ever continues a byte-identical setup. See
-    ``experiment_paths``."""
-    return f"{config_hash_[:7]}-s{seed}"
+    (config_hash, seed[, repeat]) pair, shared by every fold of that run.
+    Unlike the old ``{experiment_name}-s{seed}`` scheme, the hash is now
+    part of the identifier itself — a config change (anything
+    ``config_hash`` doesn't strip) lands in a fresh directory instead of
+    silently reusing an old one, so ``--resume`` only ever continues a
+    byte-identical setup. See ``experiment_paths``.
+
+    ``repeat`` identifies the Nth full re-run of this exact (config_hash,
+    seed) — same seed re-seeded identically each time, run to measure/
+    average out whatever residual noise survives fixed seeding (hardware/
+    kernel non-determinism — see training/determinism.py), as distinct
+    from ``seed`` itself (which varies model-init/data-order stochasticity
+    on purpose). Omitted from the identifier (and therefore the path) when
+    ``repeat is None`` — a single, non-repeated run — so existing single-
+    run layouts are unaffected."""
+    repeat_part = f"-r{repeat}" if repeat is not None else ""
+    return f"{config_hash_[:7]}-s{seed}{repeat_part}"
 
 
 def experiment_paths(
@@ -81,26 +95,41 @@ def experiment_paths(
     config_hash_: str,
     seed: int,
     fold: Optional[int] = None,
+    repeat: Optional[int] = None,
 ) -> Dict[str, str]:
     """Resolve every path under one experiment's directory,
     ``{base_dir}/{experiment_name}/{experiment_id}/``. Content type is the
     top-level split (checkpoints/logs/tensorboard/plots/eval); fold is a
     subdirectory of checkpoints/tensorboard/plots when this is a K-Fold run
     (``fold`` given) and omitted entirely for a non-CV run (``fold=None``).
+    ``repeat`` (Nth identical re-run of this (config_hash, seed) — see
+    ``experiment_id``) is folded into ``root`` itself via ``experiment_id``,
+    so every repeat gets its own complete, independent
+    checkpoints/logs/tensorboard/plots/eval tree, exactly like every seed
+    does today.
 
-    ``fold_splits`` and ``combined_report`` are deliberately *not* under
-    ``root`` — they're shared across every seed of this
-    (experiment_name, config_hash), not scoped to one seed:
+    ``fold_splits``, ``seed_combined_report`` and ``combined_report`` are
+    deliberately *not* under ``root`` — they're shared across every
+    seed/repeat of this (experiment_name, config_hash), not scoped to one
+    run:
 
-    - ``fold_splits``: all seeds of the same config hash must train/
-      validate on the same fold partition (only model-init/training
-      randomness should vary across seeds, not the data split itself) —
-      see ``datasets.datamodule.KFoldDataModule``.
+    - ``fold_splits``: all seeds *and* repeats of the same config hash
+      must train/validate on the same fold partition (only model-init/
+      training randomness — and, for repeats, only residual hardware
+      non-determinism — should vary, not the data split itself) — see
+      ``datasets.datamodule.KFoldDataModule``.
+    - ``seed_combined_report``: the repeat-averaged eval report for one
+      seed (mean ± std over that seed's ``n_repeats`` independent runs —
+      see ``utils.report.aggregate_repeat_reports``), sitting adjacent to
+      every ``{hash7}-s{seed}-r{repeat}/`` directory sharing that seed.
+      Feeds ``combined_report`` below in place of a raw single-run
+      report.json when repeats are in use.
     - ``combined_report``: the seed-averaged eval report, sitting adjacent
-      to every ``{hash7}-s{seed}/`` directory under this experiment_name.
+      to every ``{hash7}-s{seed}[-r{repeat}]/`` directory under this
+      experiment_name.
     """
     exp_root = os.path.join(base_dir, experiment_name)
-    root = os.path.join(exp_root, experiment_id(config_hash_, seed))
+    root = os.path.join(exp_root, experiment_id(config_hash_, seed, repeat))
 
     def _fold_scoped(*parts: str) -> str:
         joined = os.path.join(root, *parts)
@@ -115,6 +144,7 @@ def experiment_paths(
         "eval": os.path.join(root, "eval"),
         "run_meta": os.path.join(root, "run_meta.json"),
         "fold_splits": os.path.join(exp_root, f"{config_hash_[:7]}-fold_splits.json"),
+        "seed_combined_report": os.path.join(exp_root, f"{config_hash_[:7]}-s{seed}.json"),
         "combined_report": os.path.join(exp_root, f"{experiment_name}.json"),
     }
 
@@ -124,6 +154,7 @@ def check_and_record_run_meta(
     experiment_name: str,
     seed: int,
     config_hash_: str,
+    repeat: Optional[int] = None,
     logger: Any = None,
 ) -> None:
     """Enforce atomicity by *check*, not by path uniqueness: on first use
@@ -154,6 +185,7 @@ def check_and_record_run_meta(
     meta = {
         "experiment_name": experiment_name,
         "seed": seed,
+        "repeat": repeat,
         "config_hash": config_hash_,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }

@@ -2,6 +2,7 @@ import os
 import copy
 import argparse
 import time
+from typing import Optional
 import torch
 import torch.nn as nn
 import numpy as np
@@ -17,7 +18,7 @@ from profiling.latency import measure_latency
 from training.determinism import reset_recorded_nondeterminism, seed_everything
 from utils.config import load_config
 from utils.metrics import count_parameters
-from utils.report import aggregate_seed_reports
+from utils.report import aggregate_repeat_reports, aggregate_seed_reports
 from utils import (
     setup_logger,
     EvaluationReporter,
@@ -30,6 +31,11 @@ from utils import (
 # separate constant rather than importing train.py, to avoid pulling in
 # its training-only dependencies just for one literal).
 DEFAULT_SEEDS = [7, 42, 1337]
+
+# Matches train.py's DEFAULT_REPEATS (same duplication rationale as
+# DEFAULT_SEEDS above) — must agree with whatever repeat count train.py
+# actually trained, or this will look for checkpoints that don't exist.
+DEFAULT_REPEATS = 3
 
 
 class EnsembleModel(nn.Module):
@@ -173,18 +179,28 @@ def _parse_args():
     seed_group.add_argument("--seeds", type=int, nargs="+", default=None,
                         help=f"Evaluate exactly these seeds, then write the combined averaged "
                              f"report (default: {DEFAULT_SEEDS}).")
+    parser.add_argument("--repeats", type=int, default=None,
+                        help=f"Number of identical re-runs per seed to evaluate (must match what "
+                             f"train.py trained; default: {DEFAULT_REPEATS}). Ignored when --seed "
+                             f"bypasses the sweep.")
     return parser.parse_args()
 
 
-def evaluate_one(config: dict, args, seed: int):
-    """Runs the full evaluation pipeline for one seed: resolves that
-    seed's checkpoint(s), evaluates on the test set, writes report.json/.md
-    under its eval/ dir.
+def evaluate_one(config: dict, args, seed: int, repeat: Optional[int] = None):
+    """Runs the full evaluation pipeline for one (seed, repeat): resolves
+    that run's checkpoint(s), evaluates on the test set, writes
+    report.json/.md under its eval/ dir.
+
+    Args:
+        repeat: Nth identical re-run of this seed (see
+            ``train.run_training``'s ``repeat`` arg) — ``None`` (default)
+            evaluates the single, non-repeated checkpoint at the legacy
+            unsuffixed path.
 
     Returns the report JSON path, or ``None`` if evaluation could not
     proceed (missing test token/loader/checkpoint) — logged, not raised,
     matching this module's existing "log it and return" style so one bad
-    seed doesn't take down the other 2 in a multi-seed call.
+    run doesn't take down the rest of a multi-seed/multi-repeat call.
     """
     config = copy.deepcopy(config)
     config['training']['seed'] = seed
@@ -205,8 +221,10 @@ def evaluate_one(config: dict, args, seed: int):
     resolved_config_hash = compute_config_hash(config)
     # fold=None here: logs/ and eval/ are shared across all folds of this
     # experiment (same as train.py) — only the checkpoint *read* path below
-    # is fold-scoped.
-    exp_paths = experiment_paths(output_dir, base_exp, resolved_config_hash, seed)
+    # is fold-scoped. repeat threads through so a repeated run's eval/
+    # report.json lands in its own independent {hash7}-s{seed}-r{repeat}/
+    # tree, same as its checkpoints do.
+    exp_paths = experiment_paths(output_dir, base_exp, resolved_config_hash, seed, repeat=repeat)
 
     # ── Logging ────────────────────────────────────────────────────────
     logger, exp_log_dir = setup_logger(exp_paths["logs"], "eval")
@@ -224,8 +242,9 @@ def evaluate_one(config: dict, args, seed: int):
         test_token = args.test_token
     elif args.allow_test_eval:
         from orchestration.ledger import LedgerWriter
+        repeat_tag = f"-r{repeat}" if repeat is not None else ""
         test_token = LedgerWriter().issue_test_token(
-            run_id=f"manual-eval-{base_exp}-s{seed}",
+            run_id=f"manual-eval-{base_exp}-s{seed}{repeat_tag}",
             config_hash=resolved_config_hash,
         )
     else:
@@ -258,7 +277,7 @@ def evaluate_one(config: dict, args, seed: int):
     # Determine which checkpoints to load. Checkpoints are fold-scoped
     # (checkpoints/fold{N}/best.pth) — resolve per-fold below.
     def _checkpoints_dir(fold=None):
-        return experiment_paths(output_dir, base_exp, resolved_config_hash, seed, fold)["checkpoints"]
+        return experiment_paths(output_dir, base_exp, resolved_config_hash, seed, fold, repeat)["checkpoints"]
 
     if args.ensemble:
         # Load all fold checkpoints for ensembling
@@ -436,27 +455,54 @@ def main():
         evaluate_one(config, args, args.seed)
         return
 
-    # Default: evaluate every seed in DEFAULT_SEEDS (or --seeds), in
-    # process, then write a combined seed-averaged report adjacent to the
-    # per-seed eval/ directories.
+    # Default: evaluate every seed in DEFAULT_SEEDS (or --seeds) x every
+    # repeat in DEFAULT_REPEATS (or --repeats), in process. Two-level
+    # aggregation: repeats are averaged within a seed first (noise
+    # surviving fixed seeding — see aggregate_repeat_reports), then those
+    # already-denoised per-seed reports are averaged across seeds exactly
+    # as before repeats existed.
     seeds = args.seeds or DEFAULT_SEEDS
-    evaluated = []
-    for s in seeds:
-        report_path = evaluate_one(config, args, s)
-        if report_path is not None:
-            evaluated.append((s, report_path))
+    n_repeats = args.repeats if args.repeats is not None else DEFAULT_REPEATS
+    # n_repeats<=1 keeps the legacy unsuffixed single-run path (None,) —
+    # same convention train.py's default sweep uses.
+    repeats = (None,) if n_repeats <= 1 else list(range(n_repeats))
 
-    if not evaluated:
+    seed_reports = []  # [(seed, path to that seed's own report)]
+    for s in seeds:
+        per_repeat = []
+        for r in repeats:
+            report_path = evaluate_one(config, args, s, repeat=r)
+            if report_path is not None:
+                per_repeat.append((r, report_path))
+
+        if not per_repeat:
+            print(f"Seed {s}: no repeat evaluation succeeded — skipping this seed.")
+            continue
+        if len(per_repeat) < len(repeats):
+            print(f"Seed {s}: only {len(per_repeat)}/{len(repeats)} repeat evals succeeded.")
+
+        if repeats == (None,):
+            # No repeat axis in use — that single report already *is*
+            # this seed's report, same as before repeats existed.
+            seed_reports.append((s, per_repeat[0][1]))
+        else:
+            seed_report_path = aggregate_repeat_reports(
+                config, [p for _, p in per_repeat], [r for r, _ in per_repeat], seed=s,
+            )
+            print(f"Seed {s}: combined {len(per_repeat)} repeat(s) → {seed_report_path}")
+            seed_reports.append((s, seed_report_path))
+
+    if not seed_reports:
         print("No seed evaluation succeeded — skipping combined report.")
         return
-    if len(evaluated) < len(seeds):
-        print(f"Only {len(evaluated)}/{len(seeds)} seed evals succeeded; "
+    if len(seed_reports) < len(seeds):
+        print(f"Only {len(seed_reports)}/{len(seeds)} seed evals succeeded; "
               f"combined report covers just those.")
 
     combined_path = aggregate_seed_reports(
-        config, [p for _, p in evaluated], [s for s, _ in evaluated]
+        config, [p for _, p in seed_reports], [s for s, _ in seed_reports]
     )
-    print(f"Combined report ({len(evaluated)} seed(s)) → {combined_path}")
+    print(f"Combined report ({len(seed_reports)} seed(s)) → {combined_path}")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from typing import Any, Dict
 
 RUNS_FIELDS = [
     "run_id", "config_hash", "experiment_name", "model_name", "dataset_name",
-    "seed", "fold", "status", "start_time", "end_time", "gpu_hours",
+    "seed", "repeat", "fold", "status", "start_time", "end_time", "gpu_hours",
     "best_metric", "monitor_metric", "git_commit", "git_dirty", "manifest_path",
 ]
 

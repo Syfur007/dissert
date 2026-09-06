@@ -585,58 +585,146 @@ class EvaluationReporter:
 
 
 # ---------------------------------------------------------------------------
-# Combined seed report
+# Combined seed / repeat reports
 # ---------------------------------------------------------------------------
 
-def aggregate_seed_reports(config: dict, report_paths, seeds) -> str:
-    """Average a set of per-seed eval reports (as written by
-    ``EvaluationReporter.save``) into one combined report, and write it to
-    ``orchestration.runid.experiment_paths(...)["combined_report"]``
-    (``{output_dir}/{experiment_name}/{experiment_name}.json``, adjacent to
-    every ``{hash7}-s{seed}/`` directory under that experiment_name).
+def _aggregate_metric_reports(report_paths):
+    """Shared mean/std core for both :func:`aggregate_repeat_reports` (same
+    seed, N identical re-runs) and :func:`aggregate_seed_reports` (N
+    different seeds) — the math is identical, only what varies across
+    *report_paths* differs, and only how each caller *shapes* the result
+    differs (see their docstrings). Averages (mean + std) only the
+    ``metrics`` (flat scalar dict — dice/miou/hd95/asd/precision/recall/
+    specificity/f2/accuracy/...) and ``per_class_metrics`` (elementwise
+    over each metric's per-class list — see ``metrics/aggregate.py``)
+    blocks of each report. ``model``/``efficiency``/``environment``/
+    ``config`` are not averaged: ``model.*`` is constant across runs of
+    the same config, and ``efficiency.*``/``environment.*`` describe the
+    measuring run, not the experiment's result.
 
-    Scope: averages (mean + std) only the ``metrics`` (flat scalar dict —
-    dice/miou/hd95/asd/precision/recall/specificity/f2/accuracy/...) and
-    ``per_class_metrics`` (elementwise over each metric's per-class list —
-    see ``metrics/aggregate.py``) blocks of each report. ``model``/
-    ``efficiency``/``environment``/``config`` are not averaged: ``model.*``
-    is constant across seeds of the same config, and
-    ``efficiency.*``/``environment.*`` describe the measuring run, not the
-    experiment's result.
+    Returns ``(mean_metrics, std_metrics, mean_per_class, std_per_class,
+    reports)`` — mean/std kept as separate flat dicts (not zipped into
+    ``{"mean", "std"}`` per key) so a caller can put the mean where a plain
+    scalar is expected (e.g. reusing it as another aggregation step's own
+    ``metrics`` input) instead of always nesting it.
     """
-    from orchestration.runid import config_hash as _config_hash
-    from orchestration.runid import experiment_paths
-
     reports = []
     for p in report_paths:
         with open(p) as fh:
             reports.append(json.load(fh))
 
-    agg_metrics = {}
+    mean_metrics, std_metrics = {}, {}
     for key in reports[0].get("metrics", {}):
         # Some metrics (e.g. fpr_on_normals/specificity_lesion_free — see
-        # metrics/aggregate.py) are legitimately None for a given seed's
+        # metrics/aggregate.py) are legitimately None for a given run's
         # test set (no lesion-free images to compute them against, etc.).
         # Excluded here the same way metrics/aggregate.py excludes an
-        # undefined per-image value from its own within-seed average.
+        # undefined per-image value from its own within-run average.
         values = [
             r["metrics"][key] for r in reports
             if r.get("metrics", {}).get(key) is not None
         ]
         if values:
-            agg_metrics[key] = {"mean": float(np.mean(values)), "std": float(np.std(values))}
+            mean_metrics[key] = float(np.mean(values))
+            std_metrics[key] = float(np.std(values))
         else:
-            agg_metrics[key] = {"mean": None, "std": None}
+            mean_metrics[key] = None
+            std_metrics[key] = None
 
-    agg_per_class = {}
+    mean_per_class, std_per_class = {}, {}
     for key in reports[0].get("per_class_metrics", {}):
         arr = np.array([
             r["per_class_metrics"][key] for r in reports if key in r.get("per_class_metrics", {})
-        ])  # (n_seeds, n_classes)
-        agg_per_class[key] = {
-            "mean": arr.mean(axis=0).tolist(),
-            "std": arr.std(axis=0).tolist(),
-        }
+        ])  # (n_runs, n_classes)
+        mean_per_class[key] = arr.mean(axis=0).tolist()
+        std_per_class[key] = arr.std(axis=0).tolist()
+
+    return mean_metrics, std_metrics, mean_per_class, std_per_class, reports
+
+
+def aggregate_repeat_reports(config: dict, report_paths, repeats, seed: int) -> str:
+    """Average one seed's ``n_repeats`` identical-seed eval reports (as
+    written by ``EvaluationReporter.save``, one per repeat directory) into
+    one combined per-seed report, written to
+    ``orchestration.runid.experiment_paths(...)["seed_combined_report"]``
+    (``{hash7}-s{seed}.json``, adjacent to every ``{hash7}-s{seed}-r{repeat}/``
+    directory for that seed).
+
+    This is the inner half of the two-level noise reduction: repeats
+    reduce whatever noise survives fixed seeding (hardware/kernel
+    non-determinism — see ``training/determinism.py``) *within* one seed.
+    ``metrics``/``per_class_metrics`` here hold the repeat-*mean* as flat
+    scalars/lists — deliberately the same shape a raw single-run
+    ``report.json`` uses — so this file is a drop-in ``report_paths`` entry
+    for :func:`aggregate_seed_reports`, which averages *across* seeds next;
+    the repeat-*std* (the noise-floor diagnostic itself) is kept in the
+    separate ``metrics_repeat_std``/``per_class_metrics_repeat_std`` blocks
+    instead of replacing the scalar, precisely so it doesn't break that
+    reuse.
+    """
+    from orchestration.runid import config_hash as _config_hash
+    from orchestration.runid import experiment_paths
+
+    mean_metrics, std_metrics, mean_per_class, std_per_class, reports = _aggregate_metric_reports(report_paths)
+
+    resolved_config_hash = _config_hash(config)
+    out = {
+        "experiment_name": config["logging"]["experiment_name"],
+        "config_hash": resolved_config_hash,
+        "seed": seed,
+        "n_repeats": len(reports),
+        "repeats": list(repeats),
+        "metrics": mean_metrics,
+        "metrics_repeat_std": std_metrics,
+        "per_class_metrics": mean_per_class,
+        "per_class_metrics_repeat_std": std_per_class,
+        "per_repeat_reports": list(report_paths),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    out_path = experiment_paths(
+        config.get("output_dir", "outputs/experiments"),
+        config["logging"]["experiment_name"],
+        resolved_config_hash,
+        seed,
+    )["seed_combined_report"]
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as fh:
+        json.dump(out, fh, indent=2)
+
+    return out_path
+
+
+def aggregate_seed_reports(config: dict, report_paths, seeds) -> str:
+    """Average a set of per-seed eval reports into one combined report, and
+    write it to ``orchestration.runid.experiment_paths(...)["combined_report"]``
+    (``{output_dir}/{experiment_name}/{experiment_name}.json``, adjacent to
+    every ``{hash7}-s{seed}[-r{repeat}]/`` directory under that
+    experiment_name).
+
+    *report_paths* is normally each seed's raw single-run ``report.json``
+    (repeats not in use); when repeats *are* in use, callers pass each
+    seed's already repeat-averaged ``{hash7}-s{seed}.json`` (from
+    :func:`aggregate_repeat_reports`) instead — that file's ``metrics``/
+    ``per_class_metrics`` are flat scalars/lists (the repeat-mean) by
+    construction, exactly like a raw ``report.json``, so this function's
+    own shape and math are unaffected either way. Unlike
+    ``aggregate_repeat_reports``, this level's own std (the across-seed
+    variance the seed axis is *for*) stays nested as ``{"mean", "std"}``
+    per key — this is the terminal, most-aggregated report; nothing
+    downstream re-consumes it as another aggregation step's input.
+    """
+    from orchestration.runid import config_hash as _config_hash
+    from orchestration.runid import experiment_paths
+
+    mean_metrics, std_metrics, mean_per_class, std_per_class, reports = _aggregate_metric_reports(report_paths)
+
+    agg_metrics = {
+        key: {"mean": mean_metrics[key], "std": std_metrics[key]} for key in mean_metrics
+    }
+    agg_per_class = {
+        key: {"mean": mean_per_class[key], "std": std_per_class[key]} for key in mean_per_class
+    }
 
     resolved_config_hash = _config_hash(config)
     out = {
