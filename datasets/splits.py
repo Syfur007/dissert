@@ -30,6 +30,19 @@ class TestLoaderGuardError(Exception):
     __test__ = False
 
 
+class FoldSplitDriftError(Exception):
+    """Raised by datasets.datamodule.KFoldDataModule when a *resuming* run
+    finds a cached fold_splits.json that doesn't match the partition its
+    config asks for.
+
+    Regenerating the partition mid-run is the worst possible outcome here:
+    the run would carry on training a checkpoint against data it was never
+    trained on, with no error and no way to tell from the results. A run
+    that isn't resuming has nothing to contradict, so it keeps the existing
+    warn-and-regenerate behaviour.
+    """
+
+
 def assert_no_subject_overlap(
     train_ids: Iterable[str],
     val_ids: Iterable[str],

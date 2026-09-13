@@ -9,6 +9,25 @@ co-located with that fold's checkpoints).
 Every field-gathering helper here is best-effort: a manifest with a missing
 optional field (no nvidia-smi on a CPU box, no psutil installed) is far more
 useful than a run that crashes because manifest-building itself failed.
+
+Statuses
+--------
+``pending`` → ``running`` → one of ``done`` / ``interrupted`` / ``failed``.
+
+``interrupted`` means the run stopped itself at a clean epoch boundary
+because its wall-clock budget was nearly spent (see
+``orchestration.budget.WallClockBudget``) — healthy and resumable, not an
+error. It is distinct from a manifest left at ``running`` forever, which is
+what a *hard*-killed process leaves behind: that process never reached
+:meth:`RunManifest.finish` at all, so "still running" and "was killed
+mid-epoch" are indistinguishable from the file alone. Stopping on budget is
+what turns that ambiguity into a recorded fact.
+
+``epochs_completed`` / ``total_epochs`` / ``resumable`` / ``wall_seconds``
+accompany every terminal status, not just ``interrupted``, so a consumer
+never has to branch on status to read progress. The first three are seeded
+at construction time so they exist even on a manifest a hard kill left at
+``running``.
 """
 from __future__ import annotations
 
@@ -140,6 +159,18 @@ class RunManifest:
             "start_time": None,
             "end_time": None,
             "gpu_hours": None,
+            "wall_seconds": None,
+            # Progress, seeded here rather than only written on a clean
+            # finish() so these keys exist even on a manifest a hard-killed
+            # process left stranded at "running" — a consumer reading a
+            # captured artifact gets 0/None/False, not a KeyError.
+            # train.py overwrites all three via the record_manifest_extra
+            # side-channel (see training/determinism.py) once the Trainer
+            # has actually run; orchestration/runner.py sets "resumable"
+            # from the presence of last.pth just before saving.
+            "epochs_completed": 0,
+            "total_epochs": None,
+            "resumable": False,
             # training/determinism.py appends here whenever torch's
             # deterministic-algorithms guard actually trips on a
             # non-deterministic op, so a run can be *reported* non-
@@ -164,6 +195,10 @@ class RunManifest:
         self.data[key] = value
 
     def finish(self, status: str = "done", error: Optional[str] = None) -> "RunManifest":
+        """Close out the run. *status* is one of ``done``, ``interrupted``
+        (stopped cleanly on a wall-clock budget — see the module docstring)
+        or ``failed``; no validation is applied, so a caller may record a
+        status this module doesn't know about."""
         self.data["end_time"] = datetime.now(timezone.utc).isoformat()
         self.data["status"] = status
         if error is not None:
@@ -171,6 +206,11 @@ class RunManifest:
         if self.data["start_time"] is not None:
             start = datetime.fromisoformat(self.data["start_time"])
             end = datetime.fromisoformat(self.data["end_time"])
+            # Recorded unconditionally, unlike gpu_hours below (which is
+            # None on a CPU box) — a caller estimating how many further
+            # sessions a run needs has to be able to read *some* duration
+            # off every manifest, GPU or not.
+            self.data["wall_seconds"] = (end - start).total_seconds()
             wall_hours = (end - start).total_seconds() / 3600.0
             # Wall-clock proxy, not device-weighted GPU-second accounting —
             # Phase 10's profiling module supersedes this with the real

@@ -22,10 +22,17 @@ live in the training/ package.  This file has no training logic.
 import argparse
 import os
 import random
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import numpy as np
 import torch
+
+# Captured at import, not inside main(), so a wall-clock budget covers
+# process startup — imports, CUDA init, dataset caching — and not just the
+# training loop. On session-limited compute that startup cost is charged to
+# the same limit the budget is protecting against.
+_PROCESS_START = time.monotonic()
 
 from datasets import KFoldDataModule, StandardSplitDataModule
 from models import get_model
@@ -60,7 +67,13 @@ from utils import (
 # Per-fold training run
 # ---------------------------------------------------------------------------
 
-def run_training(config: dict, fold=None, run_id: Optional[str] = None, repeat: Optional[int] = None) -> float:
+def run_training(
+    config: dict,
+    fold=None,
+    run_id: Optional[str] = None,
+    repeat: Optional[int] = None,
+    budget: Optional[Any] = None,
+) -> float:
     """Build all components and run Trainer.fit() for one fold (or non-CV run).
 
     Args:
@@ -77,6 +90,15 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None, repeat: 
             (default) is a single, non-repeated run — the historical
             behavior, same directory as before. Never stored in *config*
             itself, same as *fold*.
+        budget: ``orchestration.budget.WallClockBudget`` or ``None``. When
+            given, the Trainer stops itself at a clean epoch boundary
+            before overrunning it, and this function records
+            ``stopped_on_budget`` into the run manifest via the
+            determinism side-channel so the caller can tell a budget stop
+            from a completed run. Never stored in *config* itself (same as
+            *fold*/*repeat*) — deliberately, so it stays out of
+            ``config_hash`` and two sessions under different budgets share
+            one output directory and can resume each other.
 
     Returns:
         Best monitored metric value.
@@ -371,10 +393,26 @@ def run_training(config: dict, fold=None, run_id: Optional[str] = None, repeat: 
         callbacks            = callbacks,
         ema                  = ema,
         scaler               = scaler,
+        budget               = budget,
     )
 
     logger.info(f"Starting training from epoch {start_epoch}...")
-    return trainer.fit(start_epoch=start_epoch)
+    try:
+        return trainer.fit(start_epoch=start_epoch)
+    finally:
+        # Publish progress into the run manifest through the same
+        # side-channel scan_impl uses above — run_training's return type
+        # (a bare float) can't carry it, and orchestration/runner.py copies
+        # every recorded extra onto the manifest before saving it. In a
+        # `finally` so a crashed run still reports how far it got.
+        from training.determinism import record_manifest_extra
+        record_manifest_extra("epochs_completed", trainer.epochs_completed)
+        record_manifest_extra("total_epochs", trainer.total_epochs)
+        record_manifest_extra("epoch_seconds", trainer.epoch_seconds)
+        if trainer.stopped_on_budget:
+            # The one flag runner.py turns into status="interrupted"
+            # instead of status="done".
+            record_manifest_extra("stopped_on_budget", True)
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +445,12 @@ def parse_args():
                              f"(default: {DEFAULT_REPEATS}). Ignored when --seed bypasses the sweep.")
     parser.add_argument("--force",           action="store_true",
                         help="Re-run seeds whose manifest already reports status=done.")
+    parser.add_argument("--max-hours",       type=float, default=None,
+                        help="Wall-clock budget for this whole process, measured from "
+                             "startup. Training stops itself at a clean epoch boundary "
+                             "before overrunning it and exits 0, leaving a resumable "
+                             "last.pth and a manifest with status=interrupted. Omit for "
+                             "unbounded training (the default).")
     parser.add_argument("--resume",          action="store_true")
     parser.add_argument("--lr",              type=float, default=None)
     parser.add_argument("--batch-size",      type=int,   default=None)
@@ -452,6 +496,18 @@ def main():
 
     kfold_cfg = config.get("k_fold", {})
 
+    # One budget shared by every run this process launches — the deadline is
+    # a property of the session, not of any single run. None (no --max-hours)
+    # disables every budget check downstream, which is the historical
+    # behaviour. Deliberately not written into `config`: it must not reach
+    # config_hash, or two sessions under different budgets would resolve to
+    # different output directories and the second could not resume the first.
+    budget = None
+    if args.max_hours is not None:
+        from orchestration.budget import WallClockBudget
+        budget = WallClockBudget(args.max_hours, start=_PROCESS_START)
+        print(f"Wall-clock budget: {args.max_hours}h from process start.")
+
     if args.seed is not None:
         # Single explicit seed — bypasses the default multi-seed sweep
         # entirely; exact pre-existing single-run behavior otherwise.
@@ -466,7 +522,7 @@ def main():
             for f in run_folds:
                 print(f"\n{'='*20} TRAINING FOLD {f} {'='*20}")
                 try:
-                    fold_results.append((f, run_training(config, fold=f), None))
+                    fold_results.append((f, run_training(config, fold=f, budget=budget), None))
                 except Exception as e:
                     # Don't let one bad fold (e.g. a CUDA OOM) take down the
                     # whole multi-hour sweep and lose every already-completed
@@ -492,7 +548,7 @@ def main():
             else:
                 print("No folds completed successfully.")
         else:
-            run_training(config, fold=args.fold)
+            run_training(config, fold=args.fold, budget=budget)
         return
 
     # Default: sweep DEFAULT_SEEDS (or --seeds) via orchestration.runner.
@@ -516,12 +572,31 @@ def main():
         folds = (None,)
 
     print(f"Training {len(seeds)} seed(s) {seeds} x {len(repeats)} repeat(s) x {len(folds)} fold(s) {list(folds)}...")
-    results = run_sweep(config, seeds=seeds, folds=folds, repeats=repeats, force=args.force)
+    results = run_sweep(
+        config, seeds=seeds, folds=folds, repeats=repeats, force=args.force, budget=budget,
+    )
     for r in results:
         print(f"run_id={r['run_id']} status={r['status']} "
               f"best_metric={r['best_metric']} error={r['error']}")
 
-    failed = [r for r in results if r["status"] not in ("done", "skipped-done")]
+    if budget is not None:
+        interrupted = [r for r in results if r["status"] == "interrupted"]
+        gated = [r for r in results if r["status"] == "skipped-budget"]
+        if interrupted or gated:
+            print(
+                f"Wall-clock budget ({args.max_hours}h) reached: "
+                f"{len(interrupted)} run(s) stopped mid-training, {len(gated)} not started. "
+                "Re-run this same command to continue from where they stopped."
+            )
+
+    # "interrupted" and "skipped-budget" are healthy outcomes, not failures —
+    # a non-zero exit here would be indistinguishable from a real error to
+    # anything driving this script, and would make a bounded session look
+    # like a crash.
+    failed = [
+        r for r in results
+        if r["status"] not in ("done", "skipped-done", "interrupted", "skipped-budget")
+    ]
     if failed:
         raise SystemExit(f"{len(failed)}/{len(results)} runs failed — see logs above.")
 

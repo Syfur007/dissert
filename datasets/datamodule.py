@@ -306,6 +306,15 @@ class KFoldDataModule(BaseDataModule):
     ``training.seed``, so all seeds deterministically compute (or find
     already cached) the identical partition regardless of run order.
 
+    This is also what makes a partition survive a resume: ``config_hash``
+    strips ``checkpoint.resume`` (see ``orchestration/runid.py``), so a
+    resuming run recomputes the same hash, resolves the same filename, and
+    reuses the cached partition rather than rebuilding it. A mismatch is
+    therefore unreachable short of a truncated-hash collision — but if one
+    ever occurred under a resume it would silently invalidate the run, so
+    ``_load_or_create_fold_splits`` raises ``FoldSplitDriftError`` there
+    instead of regenerating.
+
     CAUTION — frame-level splitting, no video/sequence grouping:
     Folds are drawn from ``sklearn.model_selection.KFold`` over individual
     (image, mask) pairs. CVC-ClinicDB and CVC-ColonDB are frame extracts
@@ -358,11 +367,30 @@ class KFoldDataModule(BaseDataModule):
             # must hit this branch and reuse the same partition.
             if cached.get("n_splits") == n_splits and cached.get("config_hash") == self._config_hash:
                 return cached["folds"]
-            logger.warning(
+
+            drift = (
                 f"Cached fold splits at {self._fold_file} were built with "
                 f"n_splits={cached.get('n_splits')}, config_hash={cached.get('config_hash')}, "
                 f"but the current config requests n_splits={n_splits}, "
-                f"config_hash={self._config_hash}. Regenerating fold splits — the old "
+                f"config_hash={self._config_hash}."
+            )
+            # A resuming run has a checkpoint that was trained against the
+            # cached partition. Silently replacing that partition would have
+            # it continue training on data it has never seen while
+            # validating on data it *has* — invalid in a way no error
+            # message or metric would ever reveal. Refuse instead.
+            if self.config.get("checkpoint", {}).get("resume", False):
+                from datasets.splits import FoldSplitDriftError
+                raise FoldSplitDriftError(
+                    f"{drift} Refusing to regenerate them for a resuming run — the "
+                    "checkpoint being resumed was trained against the cached "
+                    "partition, and replacing it would silently train and validate "
+                    "on different data than before. Either resume with the original "
+                    "config, or start a fresh run (checkpoint.resume: false), which "
+                    "will regenerate the partition."
+                )
+            logger.warning(
+                f"{drift} Regenerating fold splits — the old "
                 "file will be overwritten. Any checkpoint resumed against a specific "
                 "fold index may no longer correspond to the same data as before."
             )

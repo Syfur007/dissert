@@ -906,3 +906,78 @@ as such, not a claim of matching a specific paper.
 - **Docs**: `OUTPUT_LAYOUT.md` updated — target layout tree, old→new mapping's ledger row, the
   `experiment_id` format, and the shared-siblings section (now three files: `fold_splits.json`, the new
   `{hash7}-s{seed}.json`, and `{experiment_name}.json`).
+
+## Phase 16 — Bounded sessions: wall-clock budgets, `interrupted` runs, status API (2026-09-06)
+
+- **Problem**: a default sweep is 9 runs for a non-CV config (3 seeds × 3 repeats) and 45 for a
+  5-fold one, which outlives a single session on compute with a hard walltime limit (a shared
+  cluster slot, a preemptible instance, a hosted notebook runtime). When the platform kills the
+  process it lands mid-epoch and possibly mid-write; nothing stopped training first, there was no
+  way to record "stopped early but healthy", and no supported way to ask what state an experiment
+  was in without reimplementing the path layout.
+- **New `orchestration/budget.py`**: `WallClockBudget(max_hours, start)` over `time.monotonic()` —
+  `elapsed()`/`remaining()`/`exhausted_by(projected_seconds)`. Deliberately *not* a config field: a
+  budget is a property of the machine, not the experiment, and putting it in the config would put it
+  in `config_hash`, so two sessions under different budgets would land in different directories and
+  the second could not resume the first. Threaded as a runtime argument instead, exactly like `fold`
+  and `repeat`.
+- **`train.py --max-hours FLOAT`**, measured from a module-import timestamp so the budget covers
+  process startup (imports, CUDA init, dataset caching) and not just the training loop. Threaded
+  into both the default `run_sweep` path and the `--seed` single-run bypass. `interrupted` and
+  `skipped-budget` are added to the exit-code success set — a non-zero exit would be
+  indistinguishable from a real failure to anything driving the script.
+- **`training/trainer.py`**: optional `budget`, checked at the *top* of each epoch against the
+  **longest** epoch observed so far (not the mean or the last — an overrun is the one failure mode
+  that loses a whole session, and first epochs are typically slowest, which biases the projection
+  the safe way). One check covers both cases: a budget already spent on entry stops with
+  `epochs_completed == 0`, so a caller can detect "this session made no progress" rather than
+  looping forever on a config whose single epoch exceeds any available session. `epochs_completed`
+  is incremented only *after* that epoch's checkpoint is on disk, so it can never claim more
+  progress than `last.pth` holds; a budget stop also ends a multi-stage run rather than just its
+  current stage. Progress reaches the manifest through the existing `record_manifest_extra`
+  side-channel (the same one `scan_impl` uses), so `run_training`'s bare-float return type needed no
+  change.
+- **`orchestration/runner.py`**: `run_sweep(..., budget=None)` gained a second level of gating —
+  a combination whose projected duration (longest run observed so far) no longer fits is not started
+  at all and is reported as `skipped-budget`, rather than burning the rest of a session on setup for
+  zero completed epochs. Reported with `continue`, not `break`, so the result list stays complete.
+  A run that stopped itself is recorded as `interrupted` instead of `done`; the idempotent skip
+  stays `== "done"`, which is precisely what makes the next session retry it (`checkpoint.resume`
+  already defaults to `True`). `budget` is passed to `train_fn` only when one exists, so an injected
+  `train_fn` written against the original signature keeps working unchanged.
+- **`orchestration/manifest.py`**: `interrupted` documented as a fifth status;
+  `epochs_completed`/`total_epochs`/`resumable` seeded at construction so the keys exist even on a
+  manifest a hard kill stranded at `running`; `wall_seconds` recorded unconditionally on `finish()`
+  (unlike `gpu_hours`, which is `None` on a CPU box).
+- **Fold splits on resume**: already correct by construction — `KFoldDataModule` keys its cache on
+  `config_hash`, and `config_hash` strips `checkpoint.resume`, so a resuming run resolves the same
+  file and reuses it. Verified and pinned with tests (mtime unchanged across a resume). The
+  warn-and-regenerate branch is now near-dead code (the filename embeds `hash7`, so a mismatch
+  implies a truncated-hash collision), but would silently invalidate a resumed run if it ever fired
+  — it now raises the new `datasets.splits.FoldSplitDriftError` when `checkpoint.resume` is true.
+  Non-resuming runs keep the existing warning and regeneration verbatim.
+- **New `orchestration/status.py`**: `describe_run(run_dir)` / `describe_experiment(exp_dir)` —
+  rolled-up `status` (worst-first, with `running` ranking above `interrupted` because on a captured
+  artifact it means a hard kill), `resumable`, `epochs_completed`/`total_epochs`, `has_fold_splits`,
+  per-fold detail, and `checkpoint_files`: the minimal repo-relative set that must travel with a run
+  for a resume to be *correct*. That set includes `best.pth` — `train.py` re-seeds
+  `CheckpointManager.best_metric` from it, so omitting it would let a resumed session overwrite a
+  genuinely better checkpoint with a worse one — and the shared `<hash7>-fold_splits.json`, whose
+  absence would make a resumed K-fold run rebuild its partition and train on different data than its
+  checkpoint saw. Imports no torch at module scope; `verify=True` opts into a real load instead of
+  trusting presence (presence normally suffices — `atomic_torch_save` makes a torn checkpoint
+  unreachable).
+- **New tests** (43): budget arithmetic and boundary cases; `run_sweep` gating, `interrupted`
+  recording, retry-not-skip, and backward-compatible `train_fn` signature; real-training budget stops
+  (already-spent budget → 0 epochs; a deterministic stub budget → mid-run stop with `last.pth` and
+  `epochs_completed` in agreement; staged runs); manifest `wall_seconds`/seeded fields; a new
+  `tests/test_fold_splits.py` (partition shared across seeds, unchanged mtime on resume, drift raises
+  under resume and still regenerates without it) and a new `tests/test_status.py` (identity, rollup
+  precedence, `checkpoint_files` contents/relativity, corrupt-manifest tolerance, glob fallback,
+  torch-free import). Suite: 315 → 358 passed, 1 skipped.
+- **Verified end-to-end** on a synthetic CPU dataset: session 1 under a tight budget stopped at
+  epoch 35/60 with `status: interrupted` and exit 0 and gated off the remaining seed as
+  `skipped-budget`; `describe_experiment` reported `interrupted`/`resumable: true`/`35 of 60`;
+  session 2 resumed from epoch 36 and completed both runs; session 3 was a full `skipped-done`
+  no-op. The gated seed's final `best_metric` was bit-identical to the same config trained
+  unbounded, i.e. the budget path does not perturb results.

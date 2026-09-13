@@ -132,7 +132,13 @@ inside one:
   *and repeat* swept under it (`datasets.datamodule.KFoldDataModule`). Its
   `KFold` `random_state` is derived from `config_hash`, not `training.seed`
   (and not repeat at all), so this is deterministic and reproducible
-  independent of which seed/repeat runs first.
+  independent of which seed/repeat runs first. It is also what makes a
+  partition survive a resume: `config_hash` strips `checkpoint.resume`, so a
+  resuming run resolves the same filename and reuses the cached partition. A
+  mismatch is unreachable short of a truncated-hash collision, but would
+  silently invalidate a resumed run if it did happen, so `KFoldDataModule`
+  raises `datasets.splits.FoldSplitDriftError` there rather than regenerating
+  (a non-resuming run keeps the existing warn-and-regenerate path).
 - **`<hash7>-s<seed>.json`** (repeats only) — written by `eval.py`'s
   default multi-repeat path (`utils.report.aggregate_repeat_reports`)
   after all of one seed's repeats are evaluated: mean ± std, per metric,
@@ -152,6 +158,75 @@ inside one:
   config_hash, its old `<hash7>-s<seed>[-r<repeat>]/` directories stay on
   disk, but only the most recent hash's combined report survives at this
   path.
+
+## Bounded sessions: run statuses and what a resume needs
+
+A default sweep is 9 runs for a non-CV config (3 seeds × 3 repeats) and 45
+for a 5-fold one, which routinely outlives one session on compute with a
+hard walltime limit (a shared-cluster slot, a preemptible instance, a
+hosted notebook runtime). `train.py --max-hours FLOAT` bounds a session:
+training stops itself at a clean **epoch boundary** before the budget would
+be overrun, exits **0**, and leaves a resumable `last.pth`. Re-running the
+same command continues where it stopped. Without the flag nothing changes —
+every check is skipped.
+
+The budget is measured from process start and shared by the whole sweep, at
+two levels: a run stops mid-training when the next epoch wouldn't fit
+(projected from the *longest* epoch observed so far), and `run_sweep`
+declines to start a further (seed, repeat, fold) whose projected duration
+wouldn't fit (projected from the longest run so far). `--max-hours` is a
+CLI argument only, never a config field — so it stays out of `config_hash`
+and two sessions under different budgets share one directory.
+
+`--max-hours` works on the `--seed` single-run bypass too, but that path
+writes no manifest (it never has), so a budget stop there is clean and exits
+0 yet is invisible to the status API below. Use the default sweep path when
+a session needs to be inspectable.
+
+Run statuses, as written to `checkpoints/[fold<N>/]manifest.json`:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` / `running` | Never started / started and not yet finished. A manifest still reading `running` after the fact means the process was **hard-killed** — it never reached `manifest.finish()` |
+| `done` | Completed its epochs (or early-stopped). Skipped by later sweeps unless `--force` |
+| `interrupted` | Stopped itself on the wall-clock budget. Healthy and resumable — **not** skipped by later sweeps, which is what makes a sweep resumable |
+| `failed` | Raised. Recorded with the error; the rest of the sweep continues |
+
+Every terminal status also carries `epochs_completed` (cumulative across
+sessions, since a resume continues the epoch counter rather than restarting
+it), `total_epochs`, `resumable`, and `wall_seconds`. `run_sweep`'s
+*returned* statuses add two that are never written to a manifest:
+`skipped-done` (idempotent skip) and `skipped-budget` (not started — no
+time left).
+
+`orchestration/status.py` reads all of this back:
+
+```python
+from orchestration.status import describe_experiment, describe_run
+
+describe_experiment("outputs/experiments/<experiment_name>")   # whole sweep
+describe_run("outputs/experiments/<experiment_name>/<hash7>-s<seed>")
+```
+
+Both return `status`/`resumable`/`epochs_completed`/`total_epochs`/
+`has_fold_splits` plus **`checkpoint_files`** — the repo-relative paths that
+must travel with a run for a resume to be *correct*, so callers moving runs
+between machines never have to re-derive this layout:
+
+- `checkpoints/[fold<N>/]last.pth` — the resume point.
+- `checkpoints/[fold<N>/]best.pth` — **not optional.** `train.py` re-seeds
+  `CheckpointManager.best_metric` from it on resume; without it the resumed
+  session compares against `-inf` and overwrites a genuinely better
+  checkpoint with a worse one.
+- `checkpoints/[fold<N>/]manifest.json`, `run_meta.json` — status and identity.
+- `<hash7>-fold_splits.json` — without it a resumed K-fold run rebuilds its
+  partition and trains on different data than its checkpoint saw.
+
+The module deliberately imports no torch at module scope, so it stays cheap
+to import for inspection; `verify=True` opts into actually loading each
+`last.pth` rather than trusting its presence (presence is normally enough —
+`utils.checkpoint.atomic_torch_save` writes via temp-file + `os.replace`, so
+a torn checkpoint isn't a reachable state).
 
 ## Listing "experiments"
 

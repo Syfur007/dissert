@@ -14,11 +14,13 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 
 import pydantic
 import pytest
 import torch
 
+from orchestration.budget import WallClockBudget
 from orchestration.ledger import LedgerWriter
 from orchestration.manifest import build_manifest
 from orchestration.runid import config_hash, experiment_id, experiment_paths, run_id
@@ -284,6 +286,233 @@ def test_run_sweep_repeats_axis(tmp_path, tiny_config):
     )
     assert all(r["status"] == "skipped-done" for r in results_2)
     assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock budgets (orchestration.budget) and the interrupted status
+# ---------------------------------------------------------------------------
+
+def test_budget_exhausted_by():
+    budget = WallClockBudget(1.0, start=time.monotonic())
+    # Nothing spent yet: a projection well inside the hour fits, one past
+    # the whole hour does not.
+    assert not budget.exhausted_by(0.0)
+    assert not budget.exhausted_by(60.0)
+    assert budget.exhausted_by(3600.1)
+    assert 0 < budget.remaining() <= 3600.0
+
+
+def test_budget_already_spent():
+    """A budget whose deadline is in the past is exhausted even by zero
+    further work — this is what makes a session that has no time left stop
+    before running an epoch rather than after."""
+    budget = WallClockBudget(0.001, start=time.monotonic() - 3600.0)
+    assert budget.exhausted_by(0.0)
+    assert budget.remaining() < 0
+
+
+def test_budget_rejects_nonpositive():
+    with pytest.raises(ValueError):
+        WallClockBudget(0)
+
+
+def test_run_sweep_gates_on_exhausted_budget(tmp_path, tiny_config):
+    """No time left => no combination is started at all, and every one is
+    reported (not silently dropped) so the caller can see what remains."""
+    calls = []
+
+    def fake_train(config, fold=None, run_id=None, repeat=None, budget=None):
+        calls.append(run_id)
+        return 0.42
+
+    results = run_sweep(
+        tiny_config, seeds=[0, 1], folds=[None], train_fn=fake_train,
+        ledger_dir=str(tmp_path / "ledger"),
+        budget=WallClockBudget(0.001, start=time.monotonic() - 3600.0),
+    )
+    assert [r["status"] for r in results] == ["skipped-budget", "skipped-budget"]
+    assert calls == []
+    # Nothing ran, so nothing may have been recorded as if it had.
+    assert not list((tmp_path).glob("**/manifest.json"))
+
+
+def test_run_sweep_records_interrupted_and_retries_it(tmp_path, tiny_config):
+    """A run that stops itself on budget is 'interrupted', not 'done' — and
+    is therefore picked up again by the next sweep instead of being skipped."""
+    from training.determinism import record_manifest_extra
+
+    calls = []
+
+    def budget_stopped_train(config, fold=None, run_id=None, repeat=None, budget=None):
+        calls.append(run_id)
+        record_manifest_extra("stopped_on_budget", True)
+        record_manifest_extra("epochs_completed", 3)
+        record_manifest_extra("total_epochs", 10)
+        return 0.42
+
+    ledger_dir = str(tmp_path / "ledger")
+    # A budget with plenty of time left, so the gate above never fires and
+    # the run itself is what stops.
+    budget = WallClockBudget(10.0)
+
+    results = run_sweep(
+        tiny_config, seeds=[0], folds=[None], train_fn=budget_stopped_train,
+        ledger_dir=ledger_dir, budget=budget,
+    )
+    assert [r["status"] for r in results] == ["interrupted"]
+
+    mpath = os.path.join(
+        experiment_paths(
+            tiny_config["output_dir"], tiny_config["logging"]["experiment_name"],
+            config_hash(tiny_config), 0,
+        )["checkpoints"],
+        "manifest.json",
+    )
+    with open(mpath) as f:
+        manifest = json.load(f)
+    assert manifest["status"] == "interrupted"
+    assert manifest["epochs_completed"] == 3
+    assert manifest["total_epochs"] == 10
+    assert manifest["wall_seconds"] is not None
+    # No last.pth was written by the fake trainer, so this must report False
+    # rather than optimistically claiming a resume point exists.
+    assert manifest["resumable"] is False
+
+    # The whole point: an interrupted run is retried, unlike a done one.
+    run_sweep(
+        tiny_config, seeds=[0], folds=[None], train_fn=budget_stopped_train,
+        ledger_dir=ledger_dir, budget=budget,
+    )
+    assert len(calls) == 2
+
+
+def test_run_sweep_without_budget_keeps_legacy_train_fn_signature(tmp_path, tiny_config):
+    """No budget => train_fn is called exactly as before, so an injected
+    function written against the original signature (which does not accept
+    `budget`) keeps working."""
+    def legacy_train(config, fold=None, run_id=None, repeat=None):
+        return 0.42
+
+    results = run_sweep(
+        tiny_config, seeds=[0], folds=[None], train_fn=legacy_train,
+        ledger_dir=str(tmp_path / "ledger"),
+    )
+    assert [r["status"] for r in results] == ["done"]
+
+
+def test_manifest_records_wall_seconds(tiny_config):
+    """wall_seconds is set for every finished run, unlike gpu_hours which is
+    None on a CPU box — a caller estimating remaining sessions needs a
+    duration off every manifest."""
+    manifest = build_manifest("R-test", tiny_config, seed=0)
+    assert manifest.data["wall_seconds"] is None
+    assert manifest.data["epochs_completed"] == 0
+    assert manifest.data["resumable"] is False
+    manifest.start().finish(status="interrupted")
+    assert manifest.data["status"] == "interrupted"
+    assert manifest.data["wall_seconds"] >= 0
+
+
+def test_trainer_stops_on_budget(tiny_config_factory):
+    """Real training, real budget: a budget that is already spent stops the
+    run before its first epoch, leaving epochs_completed at 0 so a caller
+    can tell this session made no progress."""
+    cfg = tiny_config_factory()
+    cfg["training"]["epochs"] = 3
+
+    spent = WallClockBudget(0.001, start=time.monotonic() - 3600.0)
+    best = run_training(cfg, fold=None, budget=spent)
+
+    from training.determinism import get_recorded_manifest_extras
+    extras = get_recorded_manifest_extras()
+    assert extras["stopped_on_budget"] is True
+    assert extras["epochs_completed"] == 0
+    assert extras["total_epochs"] == 3
+    assert best is not None
+
+
+class _BudgetAfter:
+    """Budget stub that reports "exhausted" only from the *n*-th check on.
+
+    Timing a real budget to trip between two epochs of a sub-second test run
+    would be flaky; what actually needs asserting is that a stop *between*
+    epochs leaves consistent state, which this pins down exactly.
+    """
+
+    max_hours = 1.0
+
+    def __init__(self, trip_on_check: int):
+        self.trip_on_check = trip_on_check
+        self.checks = 0
+
+    def exhausted_by(self, projected_seconds=0.0):
+        self.checks += 1
+        return self.checks >= self.trip_on_check
+
+    def elapsed(self):
+        return 0.0
+
+    def remaining(self):
+        return 0.0
+
+
+def test_trainer_stops_between_epochs(tiny_config_factory):
+    """Stopping mid-run leaves epochs_completed at the last epoch whose
+    checkpoint is on disk — the two can never disagree, which is what a
+    resume depends on."""
+    cfg = tiny_config_factory()
+    cfg["training"]["epochs"] = 4
+
+    # Checked once per epoch: pass for epoch 1, trip before epoch 2.
+    run_training(cfg, fold=None, budget=_BudgetAfter(trip_on_check=2))
+
+    from training.determinism import get_recorded_manifest_extras
+    extras = get_recorded_manifest_extras()
+    assert extras["stopped_on_budget"] is True
+    assert extras["epochs_completed"] == 1
+    assert extras["total_epochs"] == 4
+    assert len(extras["epoch_seconds"]) == 1
+
+    chk = experiment_paths(
+        cfg["output_dir"], cfg["logging"]["experiment_name"],
+        config_hash(cfg), cfg["training"]["seed"],
+    )["checkpoints"]
+    last = torch.load(os.path.join(chk, "last.pth"), map_location="cpu")
+    assert last["epoch"] == extras["epochs_completed"]
+
+
+def test_trainer_budget_stop_ends_staged_run(tiny_config_factory):
+    """A budget stop inside one stage ends the whole run — otherwise the
+    next stage would start straight through the deadline."""
+    cfg = tiny_config_factory()
+    cfg["stages"] = [
+        {"epochs": 2, "lr": 0.01, "freeze": []},
+        {"epochs": 2, "lr": 0.001, "freeze": []},
+    ]
+
+    run_training(cfg, fold=None, budget=_BudgetAfter(trip_on_check=2))
+
+    from training.determinism import get_recorded_manifest_extras
+    extras = get_recorded_manifest_extras()
+    assert extras["stopped_on_budget"] is True
+    assert extras["epochs_completed"] == 1
+    # Summed across stages, so progress is readable without the config.
+    assert extras["total_epochs"] == 4
+
+
+def test_trainer_without_budget_runs_every_epoch(tiny_config_factory):
+    """The new machinery is inert when no budget is given — the pre-existing
+    behaviour is unchanged."""
+    cfg = tiny_config_factory()
+    cfg["training"]["epochs"] = 2
+
+    run_training(cfg, fold=None)
+
+    from training.determinism import get_recorded_manifest_extras
+    extras = get_recorded_manifest_extras()
+    assert "stopped_on_budget" not in extras
+    assert extras["epochs_completed"] == 2
+    assert extras["total_epochs"] == 2
 
 
 # ---------------------------------------------------------------------------

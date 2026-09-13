@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -48,6 +49,20 @@ def _round_to_divisor(value: float, divisor: int) -> int:
     """
     rounded = int(round(value / divisor)) * divisor
     return max(divisor, rounded)
+
+
+def _fmt_duration(seconds: float) -> str:
+    """``h:mm:ss`` for a duration in seconds.
+
+    Budget messages are the operator's only view of why a run stopped, and
+    a fixed unit makes them useless at one end of the range or the other —
+    a 9-hour budget printed in seconds, or a 40-second epoch printed as
+    "0.01h".
+    """
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
 def _apply_grad_clip(
@@ -93,6 +108,24 @@ class Trainer:
         callbacks:     List of Callback instances.
         ema:           EMA instance (or None).
         scaler:        GradScaler for AMP (or None).
+        budget:        Wall-clock budget (``orchestration.budget.WallClockBudget``)
+                       or None. When given, training stops itself at a clean
+                       epoch boundary before the budget would be overrun,
+                       leaving a complete ``last.pth`` to resume from — see
+                       ``_fit_range``. ``None`` (the default) disables every
+                       budget check, which is the pre-existing behaviour.
+
+    Attributes set during ``fit()`` (read by ``train.run_training``, which
+    forwards them into the run manifest — see ``training/determinism.py``'s
+    ``record_manifest_extra`` side-channel):
+        epochs_completed:  last epoch actually finished. Cumulative across
+                           resumed sessions, since a resume starts at
+                           ``checkpoint_epoch + 1`` rather than at 1.
+        total_epochs:      the run's epoch target, so progress is readable
+                           without also having the config.
+        epoch_seconds:     per-epoch durations observed *this* session.
+        stopped_on_budget: True iff the run ended because of *budget*, as
+                           opposed to finishing its epochs or early-stopping.
     """
 
     def __init__(
@@ -113,6 +146,7 @@ class Trainer:
         callbacks:            Optional[List[Callback]] = None,
         ema:                  Optional[EMA] = None,
         scaler:               Optional[torch.cuda.amp.GradScaler] = None,
+        budget:               Optional[Any] = None,
     ):
         self.model               = model
         self.criterion           = criterion
@@ -130,10 +164,27 @@ class Trainer:
         self.callbacks           = callbacks or []
         self.ema                 = ema
         self.scaler              = scaler
+        self.budget              = budget
 
         # Shorthand sub-configs
         self._tcfg  = config.get("training", {})
         self._chkcfg = config.get("checkpoint", {})
+
+        # Budget/progress bookkeeping (see the class docstring). total_epochs
+        # is the *target*, computed the same way fit() picks its loop bounds:
+        # the sum of the stage epochs for a multi-stage run (whose epoch
+        # counter is continuous across stages — see _fit_staged), otherwise
+        # training.epochs.
+        stages = config.get("stages", [])
+        if stages:
+            self.total_epochs = sum(
+                s.get("epochs", self._tcfg.get("epochs", 50)) for s in stages
+            )
+        else:
+            self.total_epochs = self._tcfg.get("epochs", 50)
+        self.epochs_completed: int = 0
+        self.epoch_seconds: List[float] = []
+        self.stopped_on_budget: bool = False
 
         # Gradient-clipping config
         self._gc_mode  = self._tcfg.get("grad_clip_mode",  "value")
@@ -186,10 +237,44 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _fit_range(self, start_epoch: int, end_epoch: int) -> float:
-        """Run epochs [start_epoch, end_epoch] inclusive."""
+        """Run epochs [start_epoch, end_epoch] inclusive.
+
+        Stops early — before running an epoch, never mid-epoch — when
+        ``self.budget`` is set and the epoch would overrun it. The check
+        sits at the top of the loop so it covers two cases with one test:
+
+        - Budget already spent on entry (nothing observed yet, projection
+          0.0): stops immediately with ``epochs_completed == 0``, which is
+          how a caller detects "this session made no progress" and stops
+          re-launching a config whose single epoch is longer than any
+          session it can get.
+        - Every later iteration: projects from the *longest* epoch observed
+          this session. Not the mean and not the last — an overrun is the
+          one failure mode that loses the whole session (the platform's own
+          kill lands mid-epoch, possibly mid-write), so the projection has
+          to be pessimistic. First epochs are typically the slowest
+          (dataset cache fill, cuDNN autotune), which biases it the safe
+          way.
+        """
         self._call("on_train_start")
 
         for epoch in range(start_epoch, end_epoch + 1):
+            if self.budget is not None:
+                projected = max(self.epoch_seconds) if self.epoch_seconds else 0.0
+                if self.budget.exhausted_by(projected):
+                    self.stopped_on_budget = True
+                    self.logger.info(
+                        f"Wall-clock budget reached before epoch {epoch} "
+                        f"({_fmt_duration(self.budget.elapsed())} of "
+                        f"{_fmt_duration(self.budget.max_hours * 3600)} spent, "
+                        f"next epoch projected {_fmt_duration(projected)}). "
+                        f"Stopping cleanly at {self.epochs_completed}/"
+                        f"{self.total_epochs} epochs — last.pth is complete "
+                        "and resumable."
+                    )
+                    break
+
+            epoch_started = time.monotonic()
             self._call("on_epoch_start", epoch)
 
             # Schedule-driven compound-loss term weights (e.g. the boundary
@@ -255,7 +340,16 @@ class Trainer:
             # Persist extra state (RNG + EarlyStopper + EMA) into the checkpoint(s)
             self._persist_extra_state(epoch, is_best)
 
-            # Early stopping
+            # Counted only now, after the checkpoint above is safely on
+            # disk — so "epochs_completed epochs are done" and "last.pth
+            # holds epoch epochs_completed" can never disagree, which is
+            # what a resume relies on.
+            self.epochs_completed = epoch
+            self.epoch_seconds.append(time.monotonic() - epoch_started)
+
+            # Early stopping. Tracked separately from the budget stop above:
+            # this one means "the metric stopped improving", which is a
+            # finished run, not an interrupted one.
             if self.early_stopper is not None and self.early_stopper(monitored_val):
                 self.logger.info(f"Early stopping triggered at epoch {epoch}.")
                 break
@@ -323,6 +417,18 @@ class Trainer:
             # Unfreeze everything before the next stage
             self._set_frozen(freeze_keys, frozen=False)
             epoch_cursor = stage_end + 1
+
+            # A budget stop inside _fit_range has to end the *whole* run,
+            # not just the current stage — otherwise the next stage would
+            # start straight through the deadline. Checked after the
+            # unfreeze above so the model is left in a clean state for the
+            # session that resumes it.
+            if self.stopped_on_budget:
+                self.logger.info(
+                    f"[Stage {stage_idx}] stopped on wall-clock budget; "
+                    "skipping remaining stages."
+                )
+                break
 
         return self.chk_manager.best_metric
 
