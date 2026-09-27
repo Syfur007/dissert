@@ -5,8 +5,8 @@ models/encoders.py's build_encoder factory.
 Which tests exercise real downloaded weights vs. local fakes
 --------------------------------------------------------------
 - test_pvt_v2_b0_parity_vendored_vs_timm_port: no network. Recovers the
-  vendored PVTv2 source from git history (commit 3385914, the last commit
-  before it was deleted in this phase) and runs the comparison in an
+  vendored PVTv2 source from git history (commit 165eb57, the last commit
+  before the src/ reorg + deletion in fb9b028) and runs the comparison in an
   isolated subprocess — see tests/_pvt_parity_probe.py's docstring for why
   a subprocess is required (importing the vendored module clobbers timm's
   global model registry for pvt_v2_b0..b5).
@@ -35,8 +35,11 @@ from dissert.orchestration.runid import config_hash
 
 # The last commit before models/pvtv2.py was deleted in this phase — see
 # module docstring. A fixed, permanent reference into git history, not the
-# moving HEAD (which no longer has the file after this phase's commit).
-_PRE_DELETION_REV = "3385914"
+# moving HEAD (which no longer has the file after this phase's commit). Must
+# be reachable from origin/main (not a locally-rewritten/dangling SHA) —
+# CI clones fresh and has no reflog to fall back on.
+_PRE_DELETION_REV = "165eb57"
+_PRE_DELETION_PATH = "models/pvtv2.py"
 _PROBE_SCRIPT = Path(__file__).with_name("_pvt_parity_probe.py")
 
 
@@ -47,7 +50,7 @@ _PROBE_SCRIPT = Path(__file__).with_name("_pvt_parity_probe.py")
 
 def test_pvt_v2_b0_parity_vendored_vs_timm_port(tmp_path):
     vendored_src = subprocess.run(
-        ["git", "show", f"{_PRE_DELETION_REV}:src/dissert/models/pvtv2.py"],
+        ["git", "show", f"{_PRE_DELETION_REV}:{_PRE_DELETION_PATH}"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True, text=True, check=True,
     ).stdout
