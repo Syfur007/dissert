@@ -10,11 +10,12 @@ import os
 
 import pytest
 
-from orchestration.ledger import LedgerWriter
-from reporting.figures import _pareto_front_indices, render_critical_difference_figure, render_degradation_curve_figure, render_pareto_frontier_figure
-from reporting.inventory import ARTEFACT_INVENTORY, audit_artefact_inventory
-from reporting.tables import (
+from dissert.orchestration.ledger import LedgerWriter
+from dissert.reporting.figures import _pareto_front_indices, render_critical_difference_figure, render_degradation_curve_figure, render_pareto_frontier_figure
+from dissert.reporting.inventory import ARTEFACT_INVENTORY, audit_artefact_inventory
+from dissert.reporting.tables import (
     BlockingRuleError,
+    check_consistent_environment,
     check_minimum_seeds,
     check_no_dirty_tree_runs,
     check_saliency_sanitized,
@@ -76,6 +77,14 @@ def test_reporting_blocks(tmp_path):
     with pytest.raises(BlockingRuleError):
         check_saliency_sanitized(["fig1", "fig2"], {"fig1": True})
 
+    # 5. mixed environment (Phase 1: Python/torch/opencv version drift)
+    mixed_runs = [
+        {"status": "done", "python_version": "3.8.20", "torch_version": "1.13.1", "opencv_version": "5.0.0"},
+        {"status": "done", "python_version": "3.10.21", "torch_version": "1.13.1", "opencv_version": "4.11.0"},
+    ]
+    with pytest.raises(BlockingRuleError):
+        check_consistent_environment(mixed_runs)
+
     # render_main_comparison_table must propagate a block, not silently render
     with pytest.raises(BlockingRuleError):
         render_main_comparison_table(_results(), ledger_dir, snapshot_id="snap")
@@ -87,6 +96,7 @@ def test_reporting_does_not_block_clean_inputs(tmp_path):
     runs = read_runs_ledger(ledger_dir)
     check_no_dirty_tree_runs(runs)  # must not raise
     check_minimum_seeds(runs)  # must not raise
+    check_consistent_environment(runs)  # must not raise (all blank -> not compared)
     check_stats_entries_present(["a_vs_b"], [{"comparison": "a_vs_b"}])  # must not raise
     check_saliency_sanitized(["fig1"], {"fig1": True})  # must not raise
 
@@ -107,6 +117,23 @@ def test_check_minimum_seeds_only_counts_done_runs(tmp_path):
     runs = read_runs_ledger(ledger_dir)
     with pytest.raises(BlockingRuleError):
         check_minimum_seeds(runs)  # only 2 "done" seeds
+
+
+def test_check_consistent_environment_only_compares_done_runs():
+    runs = [
+        {"status": "done", "python_version": "3.10.21", "torch_version": "1.13.1", "opencv_version": "4.11.0"},
+        {"status": "done", "python_version": "3.10.21", "torch_version": "1.13.1", "opencv_version": "4.11.0"},
+        # A failed run recorded under a different environment must not block.
+        {"status": "failed", "python_version": "3.8.20", "torch_version": "1.13.1", "opencv_version": "5.0.0"},
+    ]
+    check_consistent_environment(runs)  # must not raise
+
+
+def test_check_consistent_environment_ignores_blank_fields():
+    # Manifests written before this rule existed have no python_version/
+    # torch_version/opencv_version at all — must not retroactively block.
+    runs = [{"status": "done"}, {"status": "done", "python_version": ""}]
+    check_consistent_environment(runs)  # must not raise
 
 
 def test_read_runs_ledger_missing_file_returns_empty(tmp_path):
@@ -153,7 +180,7 @@ def test_render_pareto_frontier_figure_rejects_empty():
 
 
 def test_render_critical_difference_figure_uses_real_nemenyi_output():
-    from stats.ranking import nemenyi_posthoc
+    from dissert.analysis.stats.ranking import nemenyi_posthoc
 
     scores = {"a": [0.9, 0.8, 0.85], "b": [0.7, 0.6, 0.65], "c": [0.8, 0.75, 0.78]}
     nem = nemenyi_posthoc(scores)

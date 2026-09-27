@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from datasets.augment import AugmentationPolicy
-from datasets.channels import (
+from dissert.datasets.augment import AugmentationPolicy
+from dissert.datasets.channels import (
     CHANNEL_GROUP_SIZES,
     MODE_GROUPS,
     build_channels,

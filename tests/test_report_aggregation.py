@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from orchestration.runid import config_hash, experiment_paths
-from utils.report import aggregate_repeat_reports, aggregate_seed_reports
+from dissert.orchestration.runid import config_hash, experiment_paths
+from dissert.evaluation.report import aggregate_repeat_reports, aggregate_seed_reports
 
 
 def _write_report(path, dice, iou):

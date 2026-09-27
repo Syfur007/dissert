@@ -13,23 +13,23 @@ import pytest
 import torch
 import torch.nn as nn
 
-from profiling.export import (
+from dissert.analysis.profiling.export import (
     ExportTimeout,
     export_all,
     try_export_onnx,
     try_export_tensorrt,
     try_export_torchscript,
 )
-from profiling.flops import (
+from dissert.analysis.profiling.flops import (
     FlopsAgreementError,
     _selective_scan_flops,
     analytic_flops,
     check_flops_agreement,
     fvcore_flops,
 )
-from profiling.memory import checkpoint_size_mb, measure_peak_memory, measure_peak_memory_table
-from profiling.latency import measure_latency, measure_latency_table
-from models.registry import get_model
+from dissert.analysis.profiling.memory import checkpoint_size_mb, measure_peak_memory, measure_peak_memory_table
+from dissert.analysis.profiling.latency import measure_latency, measure_latency_table
+from dissert.models.registry import get_model
 
 
 def _tiny_conv_model():
@@ -143,7 +143,7 @@ def test_flops_agreement():
             channels=[4, 8, 16, 24, 32], depths=[1, 1, 1, 1, 1], kernel_sizes=[1, 3, 5],
             expansion_factor=2, num_classes=1, in_channels=3,
         ),
-        "emcad": dict(pretrain=False),
+        "emcad": dict(encoder={"name": "pvt_v2_b2", "weights": "none"}),
         "mamba_unet": dict(
             num_classes=1, in_channels=3, out_channels=1, channels=[4, 8, 16, 24, 32],
             depths=[1, 1, 1, 1, 1], kernel_sizes=[1, 3, 5], expansion_factor=2, d_state=8,

@@ -11,10 +11,10 @@ import pydantic
 import pytest
 import torch
 
-from losses import get_loss
-from losses.compound import CompoundLoss, REDUNDANT_TERM_FAMILIES, StructureLoss
-from losses.schedules import apply_schedule, constant, linear_ramp
-from losses.terms import (
+from dissert.losses import get_loss
+from dissert.losses.compound import CompoundLoss, REDUNDANT_TERM_FAMILIES, StructureLoss
+from dissert.losses.schedules import apply_schedule, constant, linear_ramp
+from dissert.losses.terms import (
     bce,
     boundary,
     ce,
@@ -24,7 +24,7 @@ from losses.terms import (
     focal,
     tversky,
 )
-from orchestration.schema import validate_config
+from dissert.config.schema import validate_config
 
 
 def _binary_batch(seed=0, size=16):

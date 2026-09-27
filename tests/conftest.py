@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import pytest
 
-from orchestration.schema import validate_config
+from dissert.config.schema import validate_config
 
 N_TRAIN, N_VAL, N_TEST = 6, 2, 2
 # Smallest size that's still a clean multiple of the model stride (32) —

@@ -981,3 +981,59 @@ as such, not a claim of matching a specific paper.
   session 2 resumed from epoch 36 and completed both runs; session 3 was a full `skipped-done`
   no-op. The gated seed's final `best_metric` was bit-identical to the same config trained
   unbounded, i.e. the budget path does not perturb results.
+
+## Repository reorganisation — `src/` layout, single `dissert` package (2026-09-25)
+
+Phase 0 of `docs/design/transfer-xai-plan.md`: a pure file-move + import-rewrite, no behaviour
+change. The repo root goes from 20 tracked directories to the PyPA-recommended `src/` layout.
+
+- **`git mv`** every top-level package (`datasets`, `models`, `losses`, `metrics`, `training`,
+  `orchestration`, `reporting`) into `src/dissert/<same name>/`; `stats`, `profiling`,
+  `uncertainty`, `robustness` into `src/dissert/analysis/<same name>/`; `analysis` (ERF/CKA/failure
+  taxonomy) into `src/dissert/analysis/mechanism/`; `attribution` into `src/dissert/xai/` (renamed —
+  Phase 4 of the plan widens its scope from attribution to explanation plus evaluation).
+  `train.py`/`eval.py`/`search.py` moved to `src/dissert/cli/{train,eval,search}.py`,
+  `scripts/generate_report.py` to `src/dissert/cli/report.py`.
+- **`utils/` grab-bag split** to its actual owners: `utils/config.py` → `dissert/config/loader.py`
+  (joined by `orchestration/schema.py` → `dissert/config/schema.py`); `utils/checkpoint.py`,
+  `utils/early_stopping.py`, `utils/plot_training.py` → `dissert/training/`; `utils/report.py`,
+  `utils/visualize.py` → `dissert/evaluation/{report,plots}.py`; `utils/metrics.py` →
+  `dissert/models/params.py` (so `models` never imports from `analysis`). Only `utils/logger.py`
+  remains under `dissert/utils/`.
+- **Mechanical import rewrite** across `src/` and `tests/` (script-driven, not hand-edited):
+  `^(from|import) <old-top-level-package>` → the new `dissert.<...>` path, plus the individual
+  module renames above. `git grep -nE "^(from|import) (datasets|models|losses|metrics|training|
+  orchestration|reporting|stats|profiling|uncertainty|robustness|analysis|attribution|utils)\b"
+  -- src tests` returns nothing.
+- **`requirements.txt` + `pytest.ini` → `pyproject.toml`**: dependencies copied verbatim (no
+  version bumped — that's Phase 1); `dev = ["pytest>=8"]` extra; `[project.scripts]` registers
+  `dissert-train`/`dissert-eval`/`dissert-search`/`dissert-report` console entry points.
+- **Temporary root shims** `train.py`/`eval.py` (`from dissert.cli.train import main; main()`)
+  keep external tooling that invokes `python train.py`/`python eval.py` at the repo root
+  (XDash's `repos/dissert.yaml`, `notebooks/kaggle_run.ipynb`) working unmodified. Each is marked
+  `TEMPORARY ROOT SHIM` and should be deleted once XDash points at the new paths.
+- **Docs moved into `docs/`**: `CODE_REVIEW.md` → `docs/reference.md`, `OUTPUT_LAYOUT.md` →
+  `docs/output-layout.md`, `SESSION_GROUPING_PLAN.md` → `docs/design/session-grouping.md`, the
+  previously-untracked `XDASH_RESUME_CONTRACT.md` → `docs/design/xdash-resume-contract.md`, and
+  the reorg/transfer-learning/XAI plan itself → `docs/design/transfer-xai-plan.md`. The dangling
+  `Technical_Framework_Spec.md` link in `docs/reference.md` (the file was never checked into this
+  repo) is removed rather than inventing the file. README's layout table, quickstart commands, and
+  every `python -m <old-package>` reference updated to the new `dissert.*` paths and
+  `dissert-train`/`dissert-eval` console scripts.
+- **Non-import edits**: `datasets/channels.py`'s channel-stats cache default moved from
+  `artifacts/channel_stats` to `outputs/cache/channel_stats`; the stray untracked root `artifacts/`
+  directory it used to create is deleted. Legacy pre-hash `outputs/{checkpoints,logs,runs,
+  artifacts,kaggle,search_test_results}` moved to `outputs/_legacy/` (nothing deleted; `outputs/`
+  is git-ignored, so this is a local filesystem tidy-up, not a tracked change).
+  `scripts/reproduce.sh` drops its `PYTHONPATH` export (the package is `pip install -e`'d instead)
+  and calls `python -m dissert.cli.*`; `.github/workflows/ci.yml` installs via `pip install -e
+  .[dev]` instead of hand-filtering `requirements.txt`; both Kaggle notebooks install via
+  `pip install -e .` and the worker template's config-probe cell imports
+  `dissert.config.loader.load_config`. `.gitignore` gains `*.egg-info/`/`.pytest_cache/` and drops
+  the now-stale `/env/*`, `/pretrained_pth`, and `image.py` special cases.
+- **Verified no behaviour change**: `pytest -q` — 358 passed, 1 skipped, unchanged from the
+  pre-move baseline. Every `configs/experiment/**/*.yaml`'s `config_hash` is byte-identical to a
+  pre-move snapshot (13/13). A pre-move `best.pth` (`mkunet_t_clinicdb`, seed 7) loads cleanly
+  through the new `dissert.cli.eval` checkpoint loader. A one-epoch CPU smoke run
+  (`dissert-train --config configs/experiment/mkunet/mkunet_t_clinicdb.yaml --seed 42 --epochs 1`)
+  completes and writes a checkpoint.

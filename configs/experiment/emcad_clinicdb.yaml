@@ -12,9 +12,12 @@ model:
   add: True
   lgag_ks: 3
   activation: 'relu'
-  encoder: 'pvt_v2_b2'
-  pretrain: True
-  pretrained_dir: './pretrained_pth/pvt/'
+  in_channels: 3
+  encoder:
+    name: pvt_v2_b2
+    weights: "timm:pvt_v2_b2.in1k"       # Phase 2 (docs/design/transfer-xai-plan.md §6.2)
+    in_chans_strategy: zero_init
+    normalization: pretrained
 
 logging:
   experiment_name: "emcad_clinicdb"

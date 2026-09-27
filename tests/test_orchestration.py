@@ -20,14 +20,14 @@ import pydantic
 import pytest
 import torch
 
-from orchestration.budget import WallClockBudget
-from orchestration.ledger import LedgerWriter
-from orchestration.manifest import build_manifest
-from orchestration.runid import config_hash, experiment_id, experiment_paths, run_id
-from orchestration.runner import run_sweep
-from orchestration.schema import validate_config
-from train import run_training
-from training.determinism import (
+from dissert.orchestration.budget import WallClockBudget
+from dissert.orchestration.ledger import LedgerWriter
+from dissert.orchestration.manifest import build_manifest
+from dissert.orchestration.runid import config_hash, experiment_id, experiment_paths, run_id
+from dissert.orchestration.runner import run_sweep
+from dissert.config.schema import validate_config
+from dissert.cli.train import run_training
+from dissert.training.determinism import (
     get_recorded_nondeterminism,
     reset_recorded_nondeterminism,
     seed_everything,
@@ -339,7 +339,7 @@ def test_run_sweep_gates_on_exhausted_budget(tmp_path, tiny_config):
 def test_run_sweep_records_interrupted_and_retries_it(tmp_path, tiny_config):
     """A run that stops itself on budget is 'interrupted', not 'done' — and
     is therefore picked up again by the next sweep instead of being skipped."""
-    from training.determinism import record_manifest_extra
+    from dissert.training.determinism import record_manifest_extra
 
     calls = []
 
@@ -423,7 +423,7 @@ def test_trainer_stops_on_budget(tiny_config_factory):
     spent = WallClockBudget(0.001, start=time.monotonic() - 3600.0)
     best = run_training(cfg, fold=None, budget=spent)
 
-    from training.determinism import get_recorded_manifest_extras
+    from dissert.training.determinism import get_recorded_manifest_extras
     extras = get_recorded_manifest_extras()
     assert extras["stopped_on_budget"] is True
     assert extras["epochs_completed"] == 0
@@ -466,7 +466,7 @@ def test_trainer_stops_between_epochs(tiny_config_factory):
     # Checked once per epoch: pass for epoch 1, trip before epoch 2.
     run_training(cfg, fold=None, budget=_BudgetAfter(trip_on_check=2))
 
-    from training.determinism import get_recorded_manifest_extras
+    from dissert.training.determinism import get_recorded_manifest_extras
     extras = get_recorded_manifest_extras()
     assert extras["stopped_on_budget"] is True
     assert extras["epochs_completed"] == 1
@@ -492,7 +492,7 @@ def test_trainer_budget_stop_ends_staged_run(tiny_config_factory):
 
     run_training(cfg, fold=None, budget=_BudgetAfter(trip_on_check=2))
 
-    from training.determinism import get_recorded_manifest_extras
+    from dissert.training.determinism import get_recorded_manifest_extras
     extras = get_recorded_manifest_extras()
     assert extras["stopped_on_budget"] is True
     assert extras["epochs_completed"] == 1
@@ -508,7 +508,7 @@ def test_trainer_without_budget_runs_every_epoch(tiny_config_factory):
 
     run_training(cfg, fold=None)
 
-    from training.determinism import get_recorded_manifest_extras
+    from dissert.training.determinism import get_recorded_manifest_extras
     extras = get_recorded_manifest_extras()
     assert "stopped_on_budget" not in extras
     assert extras["epochs_completed"] == 2

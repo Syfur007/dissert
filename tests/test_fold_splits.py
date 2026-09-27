@@ -23,9 +23,9 @@ import os
 
 import pytest
 
-from datasets.datamodule import DATASETS, KFoldDataModule
-from datasets.splits import FoldSplitDriftError
-from orchestration.runid import config_hash, experiment_paths
+from dissert.datasets.datamodule import DATASETS, KFoldDataModule
+from dissert.datasets.splits import FoldSplitDriftError
+from dissert.orchestration.runid import config_hash, experiment_paths
 
 
 class _FakeKFoldHandler:

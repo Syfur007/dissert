@@ -10,9 +10,9 @@ import numpy as np
 import pytest
 import torch
 
-from models.registry import get_model
-from uncertainty.ensemble import inter_seed_variance, predict_ensemble_members, predictive_entropy
-from uncertainty.retention import error_detection_auroc, retention_curve, uncertainty_error_correlation
+from dissert.models.registry import get_model
+from dissert.analysis.uncertainty.ensemble import inter_seed_variance, predict_ensemble_members, predictive_entropy
+from dissert.analysis.uncertainty.retention import error_detection_auroc, retention_curve, uncertainty_error_correlation
 
 
 def _mk_unet():

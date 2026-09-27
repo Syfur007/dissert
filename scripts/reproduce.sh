@@ -7,9 +7,9 @@
 # Honest about what each stage actually is today:
 #   - S1, S6, S15, S17 have real, working commands below — this script
 #     executes them for real.
-#   - S3/S4/S5 reuse S6's same train.py/orchestration.sweep machinery
-#     (a "sanity"/"baseline"/"LR-sweep" run *is* a train.py run with
-#     different config knobs — there is no separate binary for them).
+#   - S3/S4/S5 reuse S6's same dissert.cli.train/dissert.orchestration.sweep
+#     machinery (a "sanity"/"baseline"/"LR-sweep" run *is* a dissert.cli.train
+#     run with different config knobs — there is no separate binary for them).
 #   - S2, S7-S14, S16 have no standalone CLI script (IMPLEMENTATION_PLAN.md
 #     Phases 4/9/11/12/13 built them as importable Python modules, meant
 #     to be driven from a notebook/analysis script once real multi-seed
@@ -29,14 +29,9 @@
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-# Explicit, not assumed: every top-level package this script's pytest/
-# python invocations import (orchestration, datasets, models, ...) lives
-# directly under the repo root with no setup.py/pyproject.toml installing
-# it — some invocation environments (a bare non-interactive shell, some
-# CI runners) don't implicitly add cwd to sys.path the way an interactive
-# shell's pytest invocation does, and silently fail with "No module named
-# 'orchestration'" otherwise.
-export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+# The dissert package is installed (editable) via `pip install -e .[dev]`,
+# so every dissert.* import below resolves through the installed package —
+# no PYTHONPATH export needed (Phase 0 repo reorg: src/ layout).
 
 SEEDS="${SEEDS:-42 43 44}"
 MODEL_CONFIG="${MODEL_CONFIG:-configs/experiment/gmkunet/gmkunet_t_clinicdb.yaml}"
@@ -65,22 +60,22 @@ pytest tests/test_channels.py -q
 # outputs/experiments/<name>/<hash7>-s<seed>/eval/report.json with the
 # smoke run's own. Seed no longer needs manually folding into the name —
 # it's already part of the on-disk experiment_id ("{config_hash[:7]}-s
-# {seed}", nested under experiment_name — see orchestration/runid.py), so
+# {seed}", nested under experiment_name — see dissert/orchestration/runid.py), so
 # each seed below lands in its own directory automatically.
-BASE_EXP_NAME="$(python3 -c "from utils.config import load_config; print(load_config('$MODEL_CONFIG')['logging']['experiment_name'])")"
+BASE_EXP_NAME="$(python3 -c "from dissert.config.loader import load_config; print(load_config('$MODEL_CONFIG')['logging']['experiment_name'])")"
 REPRODUCE_TAG="${BASE_EXP_NAME}_reproduce_${SNAPSHOT_ID}"
 
 echo ""
 echo "=============================================================="
 echo "S3/S4/S6 Sanity training / baseline repro / main comparison"
 echo "   — reduced to ${EPOCHS} epoch(s), seed(s): ${SEEDS}, on"
-echo "   ${MODEL_CONFIG}, via orchestration.runner.run_sweep"
+echo "   ${MODEL_CONFIG}, via dissert.orchestration.runner.run_sweep"
 echo "   scoped experiment name: ${REPRODUCE_TAG} (outputs/experiments/${REPRODUCE_TAG}/<hash7>-s<seed>/)"
 echo "=============================================================="
 python3 - "$MODEL_CONFIG" "$EPOCHS" "$LEDGER_DIR" "$SEEDS" "$REPRODUCE_TAG" <<'PYEOF'
 import sys
-from utils.config import load_config
-from orchestration.runner import run_sweep
+from dissert.config.loader import load_config
+from dissert.orchestration.runner import run_sweep
 
 model_config, epochs, ledger_dir, seeds_str, tag = sys.argv[1:6]
 seeds = [int(s) for s in seeds_str.split()]
@@ -102,70 +97,71 @@ PYEOF
 
 echo ""
 echo "=============================================================="
-echo "S5 LR sweep — orchestration/sweep.py (needs search.budget_gpu_hours"
+echo "S5 LR sweep — dissert/orchestration/sweep.py (needs search.budget_gpu_hours"
 echo "   in configs/search_config.yaml; not run automatically here since"
-echo "   it trains a full grid of trials — see orchestration/sweep.py's"
-echo "   own CLI: python -m orchestration.sweep --base-config ... "
+echo "   it trains a full grid of trials — see dissert.orchestration.sweep's"
+echo "   own CLI: python -m dissert.orchestration.sweep --base-config ... "
 echo "   --search-config configs/search_config.yaml)"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
-echo "S7 Statistics — stats.run_family_comparison(...) on per-image"
-echo "   Parquet from metrics.aggregate.write_per_image_parquet(...);"
+echo "S7 Statistics — dissert.analysis.stats.run_family_comparison(...) on per-image"
+echo "   Parquet from dissert.metrics.aggregate.write_per_image_parquet(...);"
 echo "   needs >=2 trained models' predictions to compare, so it is not"
-echo "   invoked by this single-model smoke run — see stats/__init__.py"
+echo "   invoked by this single-model smoke run — see dissert/analysis/stats/__init__.py"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
-echo "S8 Ablation / S9 Channel study — additional train.py runs over"
+echo "S8 Ablation / S9 Channel study — additional dissert.cli.train runs over"
 echo "   ablation/channel-mode config variants, aggregated the same way"
 echo "   as S6 above (no separate stage; a matter of which configs are"
-echo "   passed to orchestration.runner.run_sweep)"
+echo "   passed to dissert.orchestration.runner.run_sweep)"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
 echo "S10 Attribution / S11 Shortcut audit / S12 Mechanism — Python"
 echo "   APIs, run against a trained checkpoint + the guarded test"
-echo "   loader's one-time token: attribution.{occlusion,shapley,"
+echo "   loader's one-time token: dissert.xai.{occlusion,shapley,"
 echo "   integrated_grads,branch,fusion_probe,segcam,sanity},"
-echo "   robustness.geometric.shortcut_audit, analysis.{erf,cka,"
+echo "   dissert.analysis.robustness.geometric.shortcut_audit,"
+echo "   dissert.analysis.mechanism.{erf,cka,"
 echo "   failure_taxonomy} — see each module's own docstring"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
-echo "S13 Uncertainty / S14 Robustness — uncertainty.{ensemble,retention},"
-echo "   robustness.{corruptions,common,geometric} — Python APIs, run"
+echo "S13 Uncertainty / S14 Robustness — dissert.analysis.uncertainty.{ensemble,retention},"
+echo "   dissert.analysis.robustness.{corruptions,common,geometric} — Python APIs, run"
 echo "   against the seed ensemble S6 above just produced"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
-echo "S15 External — guarded one-time test evaluation via eval.py,"
+echo "S15 External — guarded one-time test evaluation via dissert.cli.eval,"
 echo "   once per seed's checkpoint (no --fold: S6 above ran with"
 echo "   k_fold disabled, so each seed's checkpoint is"
 echo "   outputs/experiments/${REPRODUCE_TAG}/<hash7>-s<seed>/checkpoints/best.pth)"
 echo "=============================================================="
 for seed in $SEEDS; do
-    python3 eval.py --config "$MODEL_CONFIG" --experiment-name "$REPRODUCE_TAG" --seed "$seed" --allow-test-eval
+    python3 -m dissert.cli.eval --config "$MODEL_CONFIG" --experiment-name "$REPRODUCE_TAG" --seed "$seed" --allow-test-eval
 done
 
 echo ""
 echo "=============================================================="
-echo "S16 Profiling — profiling.{flops,latency,memory,export}; already"
-echo "   folded into eval.py's own report (model.flops/efficiency.* in"
+echo "S16 Profiling — dissert.analysis.profiling.{flops,latency,memory,export}; already"
+echo "   folded into dissert.cli.eval's own report (model.flops/efficiency.* in"
 echo "   the JSON dump S17 reads below) via check_flops_agreement/"
-echo "   measure_latency (see eval.py's own imports)"
+echo "   measure_latency (see dissert.cli.eval's own imports)"
 echo "=============================================================="
 
 echo ""
 echo "=============================================================="
-echo "S17 Reporting — render manuscript tables from eval.py's JSON dumps"
+echo "S17 Reporting — render manuscript tables from dissert.cli.eval's JSON dumps"
 echo "=============================================================="
-python3 scripts/generate_report.py \
+python3 -m dissert.cli.report \
     --reports-glob "outputs/experiments/${REPRODUCE_TAG}/*-s*/eval/report.json" \
     --ledger-dir "$LEDGER_DIR" \
     --out-dir "$REPORTS_DIR" \

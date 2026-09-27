@@ -9,9 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from analysis.cka import cka_matrix, flatten_spatial_features, linear_cka
-from analysis.erf import compute_erf, erf_radius
-from analysis.failure_taxonomy import FAILURE_CATEGORIES, classify_failure, failure_counts, gallery_indices
+from dissert.analysis.mechanism.cka import cka_matrix, flatten_spatial_features, linear_cka
+from dissert.analysis.mechanism.erf import compute_erf, erf_radius
+from dissert.analysis.mechanism.failure_taxonomy import FAILURE_CATEGORIES, classify_failure, failure_counts, gallery_indices
 
 H, W = 16, 16
 

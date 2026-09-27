@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from models.build import build_width_matched
-from models.registry import ModelBudgetExceededError, get_model
-from utils.metrics import count_parameters
+from dissert.models.build import build_width_matched
+from dissert.models.registry import ModelBudgetExceededError, get_model
+from dissert.models.params import count_parameters
 
 _PRESETS = {
     "t": [4, 8, 16, 24, 32],
@@ -95,4 +95,71 @@ def test_registry_budget_ceiling_not_triggered_when_under():
         kernel_sizes=[1, 3, 5], expansion_factor=2, gag_kernel=3,
         num_classes=1, in_channels=3, budget_ceiling=1_000_000,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (docs/design/transfer-xai-plan.md §6.4): ModelRegistry.get() reports
+# both trainable and total parameter counts; budget_ceiling applies to total
+# unless budget_on="trainable" is requested explicitly.
+# ---------------------------------------------------------------------------
+
+def test_registry_reports_trainable_and_total_param_counts():
+    from dissert.models.params import count_total_parameters
+
+    model = get_model(
+        name="mk_unet", channels=_PRESETS["t"], depths=[1, 1, 1, 1, 1],
+        kernel_sizes=[1, 3, 5], expansion_factor=2, gag_kernel=3,
+        num_classes=1, in_channels=3,
+    )
+    assert model.param_counts == {
+        "trainable": count_parameters(model),
+        "total": count_total_parameters(model),
+    }
+    # No frozen parameters anywhere in this family yet (freezing is Phase 3's
+    # stages[].freeze, applied post-construction) — the two counts coincide.
+    assert model.param_counts["trainable"] == model.param_counts["total"] > 0
+
+
+def test_registry_budget_on_defaults_to_total():
+    with pytest.raises(ModelBudgetExceededError, match="total"):
+        get_model(
+            name="mk_unet", channels=_PRESETS["l"], depths=[1, 1, 1, 1, 1],
+            kernel_sizes=[1, 3, 5], expansion_factor=2, gag_kernel=3,
+            num_classes=1, in_channels=3, budget_ceiling=100_000,
+        )
+
+
+def test_registry_budget_on_trainable_is_explicit():
+    with pytest.raises(ModelBudgetExceededError, match="trainable"):
+        get_model(
+            name="mk_unet", channels=_PRESETS["l"], depths=[1, 1, 1, 1, 1],
+            kernel_sizes=[1, 3, 5], expansion_factor=2, gag_kernel=3,
+            num_classes=1, in_channels=3, budget_ceiling=100_000, budget_on="trainable",
+        )
+
+
+def test_registry_budget_on_rejects_unknown_value():
+    with pytest.raises(ValueError, match="budget_on"):
+        get_model(
+            name="mk_unet", channels=_PRESETS["t"], depths=[1, 1, 1, 1, 1],
+            kernel_sizes=[1, 3, 5], expansion_factor=2, gag_kernel=3,
+            num_classes=1, in_channels=3, budget_on="bogus",
+        )
+
+
+def test_count_total_parameters_includes_frozen_params():
+    """models.params.count_total_parameters (Phase 2): a frozen pretrained
+    encoder must still count toward the total, unlike count_parameters()
+    (trainable-only) — the exact gap §1.2 of the plan flags ("a frozen 300M-
+    parameter encoder passes budget_ceiling")."""
+    import torch.nn as nn
+
+    from dissert.models.params import count_total_parameters
+
+    model = nn.Sequential(nn.Linear(10, 10), nn.Linear(10, 10))
+    for p in model[0].parameters():
+        p.requires_grad = False
+
+    assert count_parameters(model) < count_total_parameters(model)
+    assert count_total_parameters(model) == sum(p.numel() for p in model.parameters())
     assert count_parameters(model) <= 1_000_000

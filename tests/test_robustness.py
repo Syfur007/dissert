@@ -9,10 +9,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from models.registry import get_model
-from robustness.common import degradation_curve, evaluate_under_corruption, mean_corruption_error
-from robustness.corruptions import CORRUPTIONS, SEVERITY_LEVELS
-from robustness.geometric import (
+from dissert.models.registry import get_model
+from dissert.analysis.robustness.common import degradation_curve, evaluate_under_corruption, mean_corruption_error
+from dissert.analysis.robustness.corruptions import CORRUPTIONS, SEVERITY_LEVELS
+from dissert.analysis.robustness.geometric import (
     frame_jitter_sensitivity,
     geometric_degradation_curve,
     off_centre_crop,

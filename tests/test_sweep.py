@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from orchestration.sweep import get_grid_paths_and_values, run_budgeted_sweep
+from dissert.orchestration.sweep import get_grid_paths_and_values, run_budgeted_sweep
 
 
 def test_get_grid_paths_and_values_nested():

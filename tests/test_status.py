@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from orchestration.status import describe_experiment, describe_run
+from dissert.orchestration.status import describe_experiment, describe_run
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +316,11 @@ def test_status_module_imports_without_torch(tmp_path, monkeypatch):
     no training stack installed, so nothing at module scope may need torch."""
     monkeypatch.setitem(sys.modules, "torch", None)
     for name in list(sys.modules):
-        if name == "orchestration.status":
+        if name == "dissert.orchestration.status":
             monkeypatch.delitem(sys.modules, name)
 
     import importlib
-    module = importlib.import_module("orchestration.status")
+    module = importlib.import_module("dissert.orchestration.status")
 
     run_dir = _make_run(str(tmp_path / "exp"), status="interrupted")
     # Presence-based resumability must not touch torch either.

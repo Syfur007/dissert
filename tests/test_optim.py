@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from training.optimizers import build_optimizer, no_decay_group
+from dissert.training.optimizers import build_optimizer, no_decay_group
 
 
 class _TinyNet(nn.Module):

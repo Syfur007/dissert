@@ -24,22 +24,22 @@ import numpy as np
 import pytest
 import torch
 
-from models.auxiliary.ss2d import DIRECTION_SETS, SS2D, _flatten, _unflatten
-from models.auxiliary.ss2d_ref import selective_scan_ref
-from models.auxiliary.vss import VSSBlock, build_vss_stage
-from models.build import build_width_matched
-from models.decoder import MambaDecoder
-from models.fusion import build_fusion
-from models.registry import ModelBudgetExceededError, get_model
-from orchestration.runid import config_hash, experiment_paths
-from orchestration.schema import validate_config
-from training.determinism import (
+from dissert.models.auxiliary.ss2d import DIRECTION_SETS, SS2D, _flatten, _unflatten
+from dissert.models.auxiliary.ss2d_ref import selective_scan_ref
+from dissert.models.auxiliary.vss import VSSBlock, build_vss_stage
+from dissert.models.build import build_width_matched
+from dissert.models.decoder import MambaDecoder
+from dissert.models.fusion import build_fusion
+from dissert.models.registry import ModelBudgetExceededError, get_model
+from dissert.orchestration.runid import config_hash, experiment_paths
+from dissert.config.schema import validate_config
+from dissert.training.determinism import (
     get_recorded_manifest_extras,
     get_recorded_nondeterminism,
     reset_recorded_nondeterminism,
 )
-from training.optimizers import no_decay_group
-from utils.metrics import count_parameters
+from dissert.training.optimizers import no_decay_group
+from dissert.models.params import count_parameters
 
 
 def _mamba_model_kwargs(**overrides):
@@ -318,7 +318,7 @@ def test_mamba_determinism(tmp_path, tiny_dataset_dir):
     here; the mamba_ssm branch's assertions describe what must hold on the
     real GPU training machine instead.
     """
-    from train import run_training
+    from dissert.cli.train import run_training
 
     scan_impl = SS2D(d_inner=4, d_state=4).scan_impl
 

@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from datasets.splits import (
+from dissert.datasets.splits import (
     ExternalDatasetError,
     LeakageError,
     TestLoaderGuardError,
@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 def test_getitem_returns_image_mask_meta(tiny_dataset_dir):
-    from datasets.dataset import METADATA_KEYS, MedicalSegmentationDataset
+    from dissert.datasets.dataset import METADATA_KEYS, MedicalSegmentationDataset
 
     img_dir = tiny_dataset_dir / "images"
     mask_dir = tiny_dataset_dir / "masks"
@@ -56,7 +56,7 @@ def test_getitem_collates_through_a_real_dataloader(tiny_config):
     # collate_fn choking on the new meta dict (e.g. a bare None inside it —
     # confirmed it does, hence dataset.py uses () for unset spacing, not
     # None). Exercise a real DataLoader, not just __getitem__ in isolation.
-    from datasets import StandardSplitDataModule
+    from dissert.datasets import StandardSplitDataModule
 
     dm = StandardSplitDataModule(tiny_config)
     train_loader, _ = dm.get_standard_loaders()
@@ -75,10 +75,10 @@ def test_all_four_consumers_accept_the_new_contract():
     grepping so this can't be fooled by a comment mentioning the old shape.
     """
     consumers = [
-        "eval.py",
-        "utils/metrics.py",
-        "training/trainer.py",
-        "training/callbacks.py",
+        "src/dissert/cli/eval.py",
+        "src/dissert/models/params.py",
+        "src/dissert/training/trainer.py",
+        "src/dissert/training/callbacks.py",
     ]
     for rel_path in consumers:
         source = (REPO_ROOT / rel_path).read_text()
@@ -123,7 +123,7 @@ def test_no_subject_overlap_against_real_clinicdb_kfold_split():
     protection, and proving the guard runs cleanly against the real handler
     interface end to end.
     """
-    from datasets.polyp.clinicdb import ClinicDB
+    from dissert.datasets.polyp.clinicdb import ClinicDB
 
     root = REPO_ROOT / "data" / "polyp" / "ClinicDB"
     if not root.exists():
@@ -134,7 +134,7 @@ def test_no_subject_overlap_against_real_clinicdb_kfold_split():
     if not pairs:
         pytest.skip("no ClinicDB train/val pairs found")
 
-    from datasets.dataset import _default_subject_id_fn
+    from dissert.datasets.dataset import _default_subject_id_fn
     from sklearn.model_selection import KFold
 
     ids = [_default_subject_id_fn(img_path) for img_path, _ in pairs]
@@ -168,7 +168,7 @@ def test_duplicate_cross_check(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_external_never_trained(tiny_dataset_dir):
-    from datasets.datamodule import _GenericHandler
+    from dissert.datasets.datamodule import _GenericHandler
 
     cfg = {"name": "synthetic_external", "root": str(tiny_dataset_dir)}
     handler = _GenericHandler(cfg, seed=0, external=True)
@@ -186,9 +186,9 @@ def test_external_never_trained(tiny_dataset_dir):
 
 
 def test_external_flows_through_standard_split_datamodule(tmp_path, tiny_dataset_dir):
-    from datasets import StandardSplitDataModule
-    from datasets.splits import ExternalDatasetError
-    from orchestration.schema import validate_config
+    from dissert.datasets import StandardSplitDataModule
+    from dissert.datasets.splits import ExternalDatasetError
+    from dissert.config.schema import validate_config
 
     raw = {
         "model": {"name": "unet", "in_channels": 3, "out_channels": 1, "features": [4, 8, 16, 32]},
@@ -215,8 +215,8 @@ def test_external_flows_through_standard_split_datamodule(tmp_path, tiny_dataset
 # ---------------------------------------------------------------------------
 
 def test_test_loader_guard(tiny_config):
-    from datasets import StandardSplitDataModule
-    from orchestration.ledger import LedgerWriter
+    from dissert.datasets import StandardSplitDataModule
+    from dissert.orchestration.ledger import LedgerWriter
 
     dm = StandardSplitDataModule(tiny_config)
     ledger_dir = tiny_config["output_dir"] + "_ledger"
@@ -243,20 +243,20 @@ def test_test_loader_guard(tiny_config):
 
 def test_sweep_cannot_see_test():
     """Static guarantee: nothing on the training/sweep path can reach the
-    guarded test loader — train.py, training/trainer.py, search.py,
+    guarded test loader — cli/train.py, training/trainer.py, cli/search.py,
     orchestration/runner.py, and orchestration/sweep.py must contain zero
-    references to get_test_loader. (eval.py and datasets/datamodule.py are
+    references to get_test_loader. (cli/eval.py and datasets/datamodule.py are
     the only two legitimate references — the guard's definition and its
     one guarded call site.) A grep-able static fact, not a runtime
     behaviour — Phase 14's "re-verified static-import guarantee" for
     orchestration/sweep.py (search.py's budget-aware successor, spec §15).
     """
     sweep_path_files = [
-        "train.py",
-        "training/trainer.py",
-        "search.py",
-        "orchestration/runner.py",
-        "orchestration/sweep.py",
+        "src/dissert/cli/train.py",
+        "src/dissert/training/trainer.py",
+        "src/dissert/cli/search.py",
+        "src/dissert/orchestration/runner.py",
+        "src/dissert/orchestration/sweep.py",
     ]
     for rel_path in sweep_path_files:
         source = (REPO_ROOT / rel_path).read_text()
@@ -287,7 +287,7 @@ def _write_pair(img_path, mask_path, rng, size=32):
 def test_busi_handler_interface(tmp_path):
     import numpy as np
 
-    from datasets.busi import BUSI
+    from dissert.datasets.busi import BUSI
 
     root = tmp_path / "busi"
     rng = np.random.default_rng(0)
@@ -315,7 +315,7 @@ def test_busi_handler_interface(tmp_path):
 def test_busi_dedup_is_mandatory_and_excludes_duplicates(tmp_path):
     import numpy as np
 
-    from datasets.busi import BUSI
+    from dissert.datasets.busi import BUSI
 
     root = tmp_path / "busi"
     (root / "benign").mkdir(parents=True)
@@ -340,7 +340,7 @@ def test_busi_dedup_is_mandatory_and_excludes_duplicates(tmp_path):
 def test_isic18_handler_interface(tmp_path):
     import numpy as np
 
-    from datasets.isic18 import ISIC18
+    from dissert.datasets.isic18 import ISIC18
 
     root = tmp_path / "isic18"
     dirs = {

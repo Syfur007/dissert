@@ -11,20 +11,20 @@ import numpy as np
 import pytest
 import torch
 
-from attribution.branch import ablate_auxiliary_stage, run_branch_ablation
-from attribution.common import compute_training_mean_image, occlude_groups, predict_hard, resolve_group_slices
-from attribution.fusion_probe import run_fusion_probe
-from attribution.integrated_grads import agreement_score, run_integrated_gradients
-from attribution.occlusion import run_channel_group_occlusion
-from attribution.sanity import (
+from dissert.xai.branch import ablate_auxiliary_stage, run_branch_ablation
+from dissert.xai.common import compute_training_mean_image, occlude_groups, predict_hard, resolve_group_slices
+from dissert.xai.fusion_probe import run_fusion_probe
+from dissert.xai.integrated_grads import agreement_score, run_integrated_gradients
+from dissert.xai.occlusion import run_channel_group_occlusion
+from dissert.xai.sanity import (
     label_randomization_sanity_check,
     parameter_randomization_sanity_check,
     randomize_model_,
 )
-from attribution.segcam import seg_grad_cam, seg_xres_cam
-from attribution.shapley import run_exact_shapley, shapley_values_from_characteristic_function
-from metrics.region import dice as _dice
-from models.registry import get_model
+from dissert.xai.segcam import seg_grad_cam, seg_xres_cam
+from dissert.xai.shapley import run_exact_shapley, shapley_values_from_characteristic_function
+from dissert.metrics.region import dice as _dice
+from dissert.models.registry import get_model
 
 H, W = 32, 32
 
@@ -302,6 +302,14 @@ def test_run_fusion_probe_rejects_model_without_fusion_stages():
 # ---------------------------------------------------------------------------
 
 def test_seg_grad_cam_shape_and_range():
+    # Fixed seed: both the model's random init and the input image are
+    # otherwise drawn from the *global* RNG state, which depends on how much
+    # randomness earlier tests in the session consumed — with an unlucky
+    # draw, every gradient-weighted channel can land non-positive and
+    # `cam.max() > 0.0` below fails. Seeding here (matching this file's own
+    # `_make_batches`/`randomize_model_(..., seed=...)` convention
+    # elsewhere) makes the test deterministic regardless of run order.
+    torch.manual_seed(0)
     model = _mamba_unet()
     model.eval()
     image = torch.rand(1, 3, H, W)
@@ -313,6 +321,7 @@ def test_seg_grad_cam_shape_and_range():
 
 
 def test_seg_xres_cam_shape_and_range():
+    torch.manual_seed(0)  # see test_seg_grad_cam_shape_and_range's comment
     model = _mamba_unet()
     model.eval()
     image = torch.rand(1, 3, H, W)

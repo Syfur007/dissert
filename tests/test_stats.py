@@ -13,11 +13,11 @@ import pytest
 from scipy.stats import friedmanchisquare, studentized_range, wilcoxon
 from statsmodels.stats.multitest import multipletests
 
-from stats import run_family_comparison
-from stats.correction import holm_bonferroni
-from stats.effectsize import cliffs_delta, paired_median_diff
-from stats.ranking import friedman_test, nemenyi_posthoc
-from stats.tests import bootstrap_ci, meaningfulness_gate, wilcoxon_paired_test
+from dissert.analysis.stats import run_family_comparison
+from dissert.analysis.stats.correction import holm_bonferroni
+from dissert.analysis.stats.effectsize import cliffs_delta, paired_median_diff
+from dissert.analysis.stats.ranking import friedman_test, nemenyi_posthoc
+from dissert.analysis.stats.tests import bootstrap_ci, meaningfulness_gate, wilcoxon_paired_test
 
 
 # ---------------------------------------------------------------------------

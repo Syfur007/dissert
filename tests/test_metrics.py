@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from metrics import (
+from dissert.metrics import (
     EMPTY_MASK_CONVENTION,
     asd,
     compute_dataset_metrics,
@@ -185,13 +185,13 @@ def test_rolling_tracks_canonical_at_epoch_end(tiny_config_factory):
     are not expected to match exactly, and must never be treated as
     interchangeable.
     """
-    from datasets import StandardSplitDataModule
+    from dissert.datasets import StandardSplitDataModule
     from loguru import logger as _logger
-    from models import get_model
-    from training import Trainer
-    from losses import get_loss
-    from training.optimizers import build_optimizer, build_scheduler
-    from utils import CheckpointManager
+    from dissert.models import get_model
+    from dissert.training import Trainer
+    from dissert.losses import get_loss
+    from dissert.training.optimizers import build_optimizer, build_scheduler
+    from dissert.training.checkpoint import CheckpointManager
 
     cfg = tiny_config_factory()
     device = torch.device("cpu")
