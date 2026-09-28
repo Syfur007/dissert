@@ -102,8 +102,8 @@ def run_sweep(
             measure/average out whatever noise survives fixed seeding
             (hardware/kernel non-determinism), not to vary anything.
         train_fn: injectable for testing; defaults to a lazy import of
-            ``train.run_training`` (kept lazy so importing this module never
-            drags in torch/train.py's full dependency chain).
+            ``dissert.cli.train.run_training`` (kept lazy so importing this
+            module never drags in torch/train.py's full dependency chain).
         force: re-run a combination even if its manifest already says
             ``status: "done"``.
         budget: shared ``orchestration.budget.WallClockBudget`` or ``None``
@@ -129,7 +129,7 @@ def run_sweep(
         later call, so the next session resumes it.
     """
     if train_fn is None:
-        from train import run_training as train_fn  # local: see docstring
+        from dissert.cli.train import run_training as train_fn  # local: see docstring
 
     h = compute_config_hash(resolved_config)
     ledger = LedgerWriter(ledger_dir)

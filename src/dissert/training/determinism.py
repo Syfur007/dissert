@@ -18,6 +18,7 @@ from typing import Callable, List
 
 import numpy as np
 import torch
+from torch.backends import cudnn
 
 from dissert.datasets.datamodule import _make_worker_init_fn
 
@@ -37,7 +38,12 @@ _NONDETERMINISM_MARKERS = (
 def _capture_showwarning(message, category, filename, lineno, file=None, line=None):
     text = str(message)
     if any(marker in text.lower() for marker in _NONDETERMINISM_MARKERS):
+        # Recorded into the manifest (get_recorded_nondeterminism) instead of
+        # printed — these are expected, already-tracked warn_only=True hits
+        # (see module docstring), and printing one per backward call floods
+        # the training log every epoch for no added information.
         _NONDETERMINISM_LOG.append(text)
+        return
     _original_showwarning(message, category, filename, lineno, file, line)
 
 
@@ -70,8 +76,8 @@ def seed_everything(seed: int, deterministic: bool = True) -> Callable[[int], No
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        cudnn.deterministic = True
+        cudnn.benchmark = False
 
     if deterministic:
         # `warn_only` kwarg present from torch 1.11 onward — confirmed
