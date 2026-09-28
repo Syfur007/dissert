@@ -100,6 +100,14 @@ class FlopsAgreementError(RuntimeError):
     MAC-style layer type), not the expected/known SS2D blind spot."""
 
 
+def _model_device(model: nn.Module) -> torch.device:
+    """*model*'s parameter device, or CPU for a parameterless module."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def _selective_scan_flops(d_inner: int, d_state: int, seqlen: int, batch: int = 1) -> int:
     """Analytic true-FLOPs count for one scan direction of
     models/auxiliary/ss2d_ref.py's ``selective_scan_ref`` — the pure-Python
@@ -152,8 +160,7 @@ def analytic_flops(model: nn.Module, input_shape: Tuple[int, int, int]) -> Dict[
     model.eval()
     try:
         with torch.no_grad():
-            device = next(model.parameters()).device
-            dummy = torch.zeros(1, *input_shape, device=device)
+            dummy = torch.zeros(1, *input_shape, device=_model_device(model))
             model(dummy)
     finally:
         for h in handles:
@@ -209,7 +216,7 @@ def fvcore_flops(model: nn.Module, input_shape: Tuple[int, int, int]) -> Dict[st
     model.eval()
     try:
         with torch.no_grad(), _stubbed_scans(model):
-            dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
+            dummy = torch.zeros(1, *input_shape, device=_model_device(model))
             analysis = FlopCountAnalysis(model, dummy)
             analysis.unsupported_ops_warnings(False)
             analysis.uncalled_modules_warnings(False)

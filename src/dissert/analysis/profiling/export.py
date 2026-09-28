@@ -26,6 +26,14 @@ class ExportTimeout(Exception):
     """Raised when a single export attempt exceeds its time budget."""
 
 
+def _model_device(model: nn.Module) -> torch.device:
+    """*model*'s parameter device, or CPU for a parameterless module."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 @contextmanager
 def _time_limit(seconds: int):
     """SIGALRM-based hard timeout (Unix-only — fine here: this project
@@ -71,7 +79,7 @@ def try_export_torchscript(
     was_training = model.training
     model.eval()
     try:
-        dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
+        dummy = torch.zeros(1, *input_shape, device=_model_device(model))
         with torch.no_grad(), _time_limit(timeout_s):
             traced = torch.jit.trace(model, dummy)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -94,7 +102,7 @@ def try_export_onnx(
     was_training = model.training
     model.eval()
     try:
-        dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
+        dummy = torch.zeros(1, *input_shape, device=_model_device(model))
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with torch.no_grad(), _time_limit(timeout_s):
             torch.onnx.export(
