@@ -17,13 +17,9 @@ jobs:
         with:
           python-version: "3.10"
 
-      # CPU wheels — a standard GitHub-hosted runner has no GPU/CUDA, and
-      # the pinned CUDA build (see requirements.txt's top comment block)
-      # only exists as a wheel on PyTorch's own cu11x/cu12x index anyway.
-      - name: Install torch/torchvision (CPU)
-        run: |
-          pip install --prefer-binary --index-url https://download.pytorch.org/whl/cpu \
-            torch==1.13.1 torchvision==0.14.1
+      # pyproject.toml pins torch/torchvision to their cu117 wheel URLs
+      # directly (see its dependency comment) — those wheels import and run
+      # fine on this GPU-less runner too, so no separate CPU-wheel step.
       - name: Install dissert (editable, dev extras)
         run: |
           pip install --prefer-binary -e .[dev]

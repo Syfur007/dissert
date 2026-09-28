@@ -14,14 +14,18 @@ requires-python = ">=3.10,<3.11"
 # removed. torch/torchvision/numpy/scipy/scikit-learn/scikit-image/pandas/
 # albumentations stay pinned exactly as before.
 dependencies = [
-    # PyTorch: pinned to match the versions this project is developed/tested against.
-    # The plain PyPI wheels below are CPU-only; for a CUDA build, install from
-    # https://download.pytorch.org/whl/cu117 instead (e.g.
-    # `pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117`)
-    # before running `pip install -e .`. (cu116 wheels also exist for torch 1.13.1
-    # if your driver predates CUDA 11.7 — check `nvidia-smi` before picking one.)
-    "torch==1.13.1+cu117",
-    "torchvision==0.14.1+cu117",
+    # PyTorch: pinned to the cu117 GPU wheel directly (PEP 508 URL reference)
+    # so a plain `pip install -e .[dev]` resolves the exact training-machine
+    # build with no separate --extra-index-url step. cu117 wheels are
+    # self-contained (bundle their own CUDA runtime) and import fine on a
+    # GPU-less machine too — `torch.cuda.is_available()` just returns False —
+    # which is why CI can use this same base dependency list on its CPU-only
+    # runner instead of a separate CPU-wheel install step.
+    # If your driver predates CUDA 11.7, override both lines with the cu116
+    # build instead (check `nvidia-smi` first):
+    # https://download.pytorch.org/whl/cu116/torch-1.13.1%2Bcu116-cp310-cp310-linux_x86_64.whl
+    "torch @ https://download.pytorch.org/whl/cu117/torch-1.13.1%2Bcu117-cp310-cp310-linux_x86_64.whl",
+    "torchvision @ https://download.pytorch.org/whl/cu117/torchvision-0.14.1%2Bcu117-cp310-cp310-linux_x86_64.whl",
 
     # Numeric stack pinned together (not just numpy) — these are the exact
     # versions this project is developed/tested against. scipy/scikit-learn/
