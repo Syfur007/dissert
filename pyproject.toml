@@ -14,18 +14,13 @@ requires-python = ">=3.10,<3.11"
 # removed. torch/torchvision/numpy/scipy/scikit-learn/scikit-image/pandas/
 # albumentations stay pinned exactly as before.
 dependencies = [
-    # PyTorch: pinned to the cu117 GPU wheel directly (PEP 508 URL reference)
-    # so a plain `pip install -e .[dev]` resolves the exact training-machine
-    # build with no separate --extra-index-url step. cu117 wheels are
-    # self-contained (bundle their own CUDA runtime) and import fine on a
-    # GPU-less machine too — `torch.cuda.is_available()` just returns False —
-    # which is why CI can use this same base dependency list on its CPU-only
-    # runner instead of a separate CPU-wheel install step.
-    # If your driver predates CUDA 11.7, override both lines with the cu116
-    # build instead (check `nvidia-smi` first):
-    # https://download.pytorch.org/whl/cu116/torch-1.13.1%2Bcu116-cp310-cp310-linux_x86_64.whl
-    "torch @ https://download.pytorch.org/whl/cu117/torch-1.13.1%2Bcu117-cp310-cp310-linux_x86_64.whl",
-    "torchvision @ https://download.pytorch.org/whl/cu117/torchvision-0.14.1%2Bcu117-cp310-cp310-linux_x86_64.whl",
+    # PyTorch: CPU-only PyPI wheels by default — no PEP 508 marker can detect
+    # actual GPU presence (only OS/arch), so an unconditional "auto-select
+    # CUDA" rule would force the ~1.8GB cu117 wheel onto every Linux/x86_64
+    # machine, GPU-less dev boxes included. A real GPU training box opts in
+    # explicitly instead: `pip install -e .[dev,gpu]` (the `gpu` extra below).
+    "torch==1.13.1",
+    "torchvision==0.14.1",
 
     # Numeric stack pinned together (not just numpy) — these are the exact
     # versions this project is developed/tested against. scipy/scikit-learn/
@@ -101,6 +96,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+
+# Opt-in on an actual GPU training box: `pip install -e .[dev,gpu]` replaces
+# the CPU-only torch/torchvision above with the exact cu117 build (direct
+# wheel URL — no separate --extra-index-url step). If your driver predates
+# CUDA 11.7, swap both URLs for the cu116 build instead (check `nvidia-smi`
+# first): https://download.pytorch.org/whl/cu116/torch-1.13.1%2Bcu116-cp310-cp310-linux_x86_64.whl
+gpu = [
+    "torch @ https://download.pytorch.org/whl/cu117/torch-1.13.1%2Bcu117-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision @ https://download.pytorch.org/whl/cu117/torchvision-0.14.1%2Bcu117-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [project.scripts]
 train = "dissert.cli.train:main"

@@ -12,7 +12,8 @@
 
 | Step | Command |
 | --- | --- |
-| Install | `conda activate thesis && pip install --prefer-binary -e .[dev]` |
+| Install (CPU / no GPU) | `conda activate thesis && pip install --prefer-binary -e .[dev]` |
+| Install (GPU training box) | `conda activate thesis && pip install --prefer-binary -e .[dev,gpu]` — pulls the pinned cu117 torch/torchvision build |
 | Test | `pytest -v` — 359 tests |
 | Train | `dissert-train --config configs/experiment/gmkunet/gmkunet_t_clinicdb.yaml` — sweeps 3 seeds by default |
 | Train (one seed) | `... --seed 42` — bypasses the sweep, exact single run |
