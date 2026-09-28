@@ -71,7 +71,7 @@ def try_export_torchscript(
     was_training = model.training
     model.eval()
     try:
-        dummy = torch.zeros(1, *input_shape)
+        dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
         with torch.no_grad(), _time_limit(timeout_s):
             traced = torch.jit.trace(model, dummy)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -94,7 +94,7 @@ def try_export_onnx(
     was_training = model.training
     model.eval()
     try:
-        dummy = torch.zeros(1, *input_shape)
+        dummy = torch.zeros(1, *input_shape, device=next(model.parameters()).device)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with torch.no_grad(), _time_limit(timeout_s):
             torch.onnx.export(

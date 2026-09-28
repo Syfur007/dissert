@@ -20,8 +20,8 @@ dependencies = [
     # `pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117`)
     # before running `pip install -e .`. (cu116 wheels also exist for torch 1.13.1
     # if your driver predates CUDA 11.7 — check `nvidia-smi` before picking one.)
-    "torch==1.13.1",
-    "torchvision==0.14.1",
+    "torch==1.13.1+cu117",
+    "torchvision==0.14.1+cu117",
 
     # Numeric stack pinned together (not just numpy) — these are the exact
     # versions this project is developed/tested against. scipy/scikit-learn/
@@ -99,10 +99,10 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [project.scripts]
-dissert-train = "dissert.cli.train:main"
-dissert-eval = "dissert.cli.eval:main"
-dissert-search = "dissert.cli.search:main"
-dissert-report = "dissert.cli.report:main"
+train = "dissert.cli.train:main"
+eval = "dissert.cli.eval:main"
+search = "dissert.cli.search:main"
+report = "dissert.cli.report:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
